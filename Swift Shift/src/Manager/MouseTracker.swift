@@ -8,10 +8,9 @@ class MouseTracker {
     private var mouseEventMonitor: Any?, initialMouseLocation, initialWindowLocation: NSPoint?
     private var trackedWindow: AXUIElement?, trackedWindowIsFocused = false, shouldFocusWindow = false
     private var currentAction: MouseAction = .none, trackingTimer: Timer?
-    private let trackingTimeout: TimeInterval = 10, minimumUpdateInterval: TimeInterval = 1.0 / 120.0
+    private let trackingTimeout: TimeInterval = 10
     private var shouldUseQuadrants = false, quadrant: Quadrant?, windowSize: CGSize?, isTracking = false
-    private var spaceChangeObserver: Any?, pendingMouseLocation: NSPoint?, lastUpdateTime: TimeInterval = 0
-    private var lastAppliedOrigin: NSPoint?, lastAppliedSize: CGSize?
+    private var spaceChangeObserver: Any?, pendingMouseLocation: NSPoint?
     private var snapRects: [CGRect] = []
     private let snapDistance: CGFloat = 10
     private var mouseLocationCoordinateSpace: MouseLocationCoordinateSpace = .appKit
@@ -51,6 +50,7 @@ class MouseTracker {
         // Apply the final pending move/resize while Enhanced UI is still disabled (fast path),
         // then restore the attribute, then run the remaining cleanup.
         flushQueuedExternalMouseUpdate(); flushPendingMouseUpdate()
+        AXWindowWriter.shared.endGesture()
         restoreEnhancedUIForTrackedApp()
         invalidateTrackingTimer(); removeMouseEventMonitor(); resetTrackingVariables(); clearQueuedExternalMouseUpdate(); isTracking = false
     }
@@ -85,12 +85,16 @@ class MouseTracker {
     }
     func forceResetTracking() {
         guard currentAction != .none, let window = trackedWindow else { return }
+        // Wait out any in-flight background write first, so the geometry read
+        // below reflects everything actually applied to the window.
+        AXWindowWriter.shared.synchronize()
         initialMouseLocation = currentMouseLocation()
-        initialWindowLocation = WindowManager.getPosition(window: window)
-        windowSize = WindowManager.getSize(window: window)
+        // A busy app can time out the re-read; keep the previous baseline then —
+        // a slightly stale anchor beats a dead gesture (nil aborts every update).
+        if let position = WindowManager.getPosition(window: window) { initialWindowLocation = position }
+        if let size = WindowManager.getSize(window: window) { windowSize = size }
         pendingMouseLocation = nil
-        lastAppliedOrigin = initialWindowLocation
-        lastAppliedSize = windowSize
+        AXWindowWriter.shared.reset(origin: initialWindowLocation, size: windowSize)
         if currentAction == .resize, shouldUseQuadrants, let m = initialMouseLocation, let w = initialWindowLocation, let s = windowSize {
             quadrant = determineQuadrant(mouseLocation: windowBoundsMouseLocation(m), windowSize: s, windowLocation: w)
         }
@@ -103,9 +107,9 @@ class MouseTracker {
         shouldUseQuadrants = PreferencesManager.loadBool(for: .useQuadrants)
         trackedWindowIsFocused = false; currentAction = action; initialMouseLocation = mouseLocation
         trackedWindow = currentWindow; initialWindowLocation = WindowManager.getPosition(window: currentWindow)
-        windowSize = WindowManager.getSize(window: currentWindow); pendingMouseLocation = nil; lastUpdateTime = 0
+        windowSize = WindowManager.getSize(window: currentWindow); pendingMouseLocation = nil
         snapRects = WindowManager.getVisibleWindowRects(excluding: currentWindow)
-        lastAppliedOrigin = initialWindowLocation; lastAppliedSize = windowSize
+        AXWindowWriter.shared.beginGesture(window: currentWindow, origin: initialWindowLocation, size: windowSize)
         if action == .resize && shouldUseQuadrants, let m = initialMouseLocation, let w = initialWindowLocation, let s = windowSize {
             quadrant = determineQuadrant(mouseLocation: windowBoundsMouseLocation(m), windowSize: s, windowLocation: w)
         }
@@ -195,7 +199,9 @@ class MouseTracker {
         }
         if shouldFocusWindow && !trackedWindowIsFocused, let w = trackedWindow { WindowManager.focus(window: w); trackedWindowIsFocused = true }
         pendingMouseLocation = mouseLocation
-        if timestamp - lastUpdateTime >= minimumUpdateInterval { flushPendingMouseUpdate(at: timestamp) }
+        // No throttling here: the math below is trivial and AXWindowWriter
+        // self-paces (latest-wins), so every event improves temporal resolution.
+        flushPendingMouseUpdate()
     }
     private func drainQueuedExternalMouseUpdate() {
         guard let update = takeQueuedExternalMouseUpdate() else { return }
@@ -227,24 +233,20 @@ class MouseTracker {
             queuedExternalMouseUpdateScheduled = false
         }
     }
-    private func flushPendingMouseUpdate(at timestamp: TimeInterval? = nil) {
+    private func flushPendingMouseUpdate() {
         guard let loc = pendingMouseLocation else { return }; pendingMouseLocation = nil
         if currentAction == .move { moveWindowBasedOnMouseLocation(loc) } else if currentAction == .resize { resizeWindowBasedOnMouseLocation(loc) }
-        if let t = timestamp { lastUpdateTime = t }
     }
     private func moveWindowBasedOnMouseLocation(_ loc: NSPoint) {
-        guard let im = initialMouseLocation, let iw = initialWindowLocation, let w = trackedWindow else { return }
+        guard let im = initialMouseLocation, let iw = initialWindowLocation, trackedWindow != nil else { return }
         let dx = loc.x - im.x, dy = loc.y - im.y
         let newY = mouseLocationCoordinateSpace == .coreGraphics ? iw.y + dy : iw.y - dy
         var newO = NSPoint(x: iw.x + dx, y: newY)
         if let size = windowSize { newO = snappedOrigin(forMoving: CGRect(origin: newO, size: size)) }
-        if !pointsApproximatelyEqual(newO, lastAppliedOrigin) {
-            let result = WindowManager.move(window: w, to: newO)
-            if result == .success { lastAppliedOrigin = newO }
-        }
+        AXWindowWriter.shared.requestMove(to: newO)
     }
     private func resizeWindowBasedOnMouseLocation(_ loc: NSPoint) {
-        guard let s = windowSize, let im = initialMouseLocation, let iw = initialWindowLocation, let w = trackedWindow else { return }
+        guard let s = windowSize, let im = initialMouseLocation, let iw = initialWindowLocation, trackedWindow != nil else { return }
         var nw = s.width, nh = s.height, no = iw
         if shouldUseQuadrants, let q = quadrant {
             let dx = loc.x - im.x, dy = verticalDelta(from: im, to: loc)
@@ -265,13 +267,7 @@ class MouseTracker {
         nw = max(nw, 1); nh = max(nh, 1)
         let snapped = snappedResize(origin: no, size: CGSize(width: nw, height: nh))
         no = snapped.origin; nw = snapped.size.width; nh = snapped.size.height
-        let ns = CGSize(width: nw, height: nh)
-        let moveO = !pointsApproximatelyEqual(no, lastAppliedOrigin)
-        if moveO || !sizesApproximatelyEqual(ns, lastAppliedSize) {
-            if WindowManager.resize(window: w, to: ns, from: no, shouldMoveOrigin: moveO) {
-                lastAppliedOrigin = no; lastAppliedSize = ns
-            }
-        }
+        AXWindowWriter.shared.requestResize(origin: no, size: CGSize(width: nw, height: nh))
     }
     private func snappedOrigin(forMoving rect: CGRect) -> NSPoint {
         let dx = closestSnapDelta(
@@ -327,19 +323,13 @@ class MouseTracker {
     }
     private func invalidateTrackingTimer() { trackingTimer?.invalidate(); trackingTimer = nil }
     private func removeMouseEventMonitor() { if let m = mouseEventMonitor { NSEvent.removeMonitor(m); mouseEventMonitor = nil } }
-    private func resetTrackingVariables() { pendingMouseLocation = nil; lastUpdateTime = 0; lastAppliedOrigin = nil; lastAppliedSize = nil; snapRects = []; trackedWindow = nil; initialMouseLocation = nil; initialWindowLocation = nil; currentAction = .none; quadrant = nil; windowSize = nil; mouseLocationCoordinateSpace = .appKit }
+    private func resetTrackingVariables() { pendingMouseLocation = nil; snapRects = []; trackedWindow = nil; initialMouseLocation = nil; initialWindowLocation = nil; currentAction = .none; quadrant = nil; windowSize = nil; mouseLocationCoordinateSpace = .appKit }
     func pauseTracking() { isTracking = false }
     func resumeTracking() { if currentAction != .none && trackedWindow != nil { isTracking = true } }
     private func checkForKeyPresses() -> Bool {
         guard let ev = NSApp.currentEvent else { return false }
         if ev.type == .keyDown || ev.type == .keyUp { if (36...126).contains(ev.keyCode) { return true } }
         return false
-    }
-    private func pointsApproximatelyEqual(_ a: NSPoint?, _ b: NSPoint?) -> Bool {
-        guard let a = a, let b = b else { return false }; return abs(a.x - b.x) < 0.5 && abs(a.y - b.y) < 0.5
-    }
-    private func sizesApproximatelyEqual(_ a: CGSize?, _ b: CGSize?) -> Bool {
-        guard let a = a, let b = b else { return false }; return abs(a.width - b.width) < 0.5 && abs(a.height - b.height) < 0.5
     }
     private func currentMouseLocation() -> NSPoint {
         if mouseLocationCoordinateSpace == .coreGraphics, let event = CGEvent(source: nil) {
