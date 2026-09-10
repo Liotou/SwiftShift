@@ -1381,6 +1381,10 @@ final class DoubleTapActionManager {
   }
 
   private static func loadConfigs() -> [Config] {
+    // By default the Resize modifier maximizes and the Move modifier minimizes;
+    // the swap preference flips which modifier does which.
+    let maximizeType: ShortcutType = PreferencesManager.loadBool(for: .doubleTapActionsSwapped) ? .move : .resize
+
     var result: [Config] = []
     for type in ShortcutType.allCases {
       guard let userShortcut = ShortcutsManager.shared.load(for: type),
@@ -1391,7 +1395,7 @@ final class DoubleTapActionManager {
       let flags = keyboardShortcut.modifierFlags
       guard !flags.isEmpty else { continue }
 
-      result.append(Config(type: type, flags: flags, action: type == .resize ? .toggleMaximize : .minimize))
+      result.append(Config(type: type, flags: flags, action: type == maximizeType ? .toggleMaximize : .minimize))
     }
     return result
   }

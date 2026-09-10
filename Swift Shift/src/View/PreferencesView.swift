@@ -37,6 +37,7 @@ struct PreferencesView: View {
   @AppStorage(PreferenceKey.useQuadrants.rawValue) private var useQuadrants = false
   @AppStorage(PreferenceKey.snapToWindows.rawValue) private var snapToWindows = true
   @AppStorage(PreferenceKey.doubleTapModifierActions.rawValue) private var doubleTapModifierActions = false
+  @AppStorage(PreferenceKey.doubleTapActionsSwapped.rawValue) private var doubleTapActionsSwapped = false
 
   var body: some View {
     VStack(alignment: .leading, spacing: 8) {
@@ -86,11 +87,26 @@ struct PreferencesView: View {
       PreferenceToggle(
         isOn: $doubleTapModifierActions,
         title: "Double-tap modifier keys",
-        subtitle: "Resize key maximizes · Move key minimizes",
+        subtitle: doubleTapActionsSwapped
+          ? "Move key maximizes · Resize key minimizes"
+          : "Resize key maximizes · Move key minimizes",
         icon: "hand.tap"
       )
       .onChange(of: doubleTapModifierActions) { _ in
         DoubleTapActionManager.shared.updateSubscriptions()
+      }
+
+      if doubleTapModifierActions {
+        PreferenceToggle(
+          isOn: $doubleTapActionsSwapped,
+          title: "Swap double-tap actions",
+          subtitle: "Maximize on the Move key, minimize on the Resize key",
+          icon: "arrow.left.arrow.right"
+        )
+        .onChange(of: doubleTapActionsSwapped) { _ in
+          DoubleTapActionManager.shared.updateSubscriptions()
+        }
+        .padding(.leading, 26)
       }
     }
   }
