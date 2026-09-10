@@ -1197,8 +1197,9 @@ final class WindowSnapActionRunner {
 
 /// Detects a quick double-tap of a modifier-only Move/Resize shortcut and runs the
 /// matching `WindowSnapAction`. A single press-hold (the normal drag gesture) never
-/// looks like a double-tap: both taps must be short and close together, with no
-/// other key, no mouse button, and no active drag in between.
+/// looks like a double-tap: both taps must be short (< `maxTapDuration`) and close
+/// together (< `maxGapBetweenTaps`), with no other key pressed, no mouse button
+/// held, and the pointer barely moving between them.
 final class DoubleTapActionManager {
   static let shared = DoubleTapActionManager()
   private init() {}
@@ -1211,6 +1212,7 @@ final class DoubleTapActionManager {
 
   private struct TapState {
     var firstPressAt: TimeInterval?
+    var firstPressLocation: NSPoint?
     var firstReleaseAt: TimeInterval?
     var secondPressAt: TimeInterval?
   }
@@ -1222,8 +1224,12 @@ final class DoubleTapActionManager {
 
   /// Each tap must be shorter than this, and the gap between them smaller still —
   /// values a deliberate double-tap clears easily but a hold never does.
-  private let maxTapDuration: TimeInterval = 0.25
-  private let maxGapBetweenTaps: TimeInterval = 0.30
+  private let maxTapDuration: TimeInterval = 0.30
+  private let maxGapBetweenTaps: TimeInterval = 0.40
+  /// If the pointer travels more than this between the first tap and the trigger,
+  /// treat it as a move/resize drag (keyboard-only mode moves on mouse motion) and
+  /// not a double-tap.
+  private let maxPointerDrift: CGFloat = 12
 
   func updateSubscriptions() {
     teardown()
@@ -1309,23 +1315,27 @@ final class DoubleTapActionManager {
   }
 
   private func handlePress(_ config: Config, now: TimeInterval) {
-    // A held mouse button or an in-progress SwiftShift drag means this modifier
-    // press is the start of a gesture, not a tap.
-    guard NSEvent.pressedMouseButtons == 0, !ShortcutsManager.shared.hasActiveShortcut else {
+    // A held mouse button means this modifier press is the start of a click-drag
+    // gesture, not a tap. (We can't key off ShortcutsManager.hasActiveShortcut here:
+    // holding the Move/Resize modifier arms that flag immediately, before any drag.)
+    guard NSEvent.pressedMouseButtons == 0 else {
       tapStates[config.type] = nil
       return
     }
 
+    let location = NSEvent.mouseLocation
     let state = tapStates[config.type]
     if let firstPress = state?.firstPressAt,
        let firstRelease = state?.firstReleaseAt,
+       let firstLocation = state?.firstPressLocation,
        (firstRelease - firstPress) <= maxTapDuration,
-       (now - firstRelease) <= maxGapBetweenTaps {
+       (now - firstRelease) <= maxGapBetweenTaps,
+       distance(firstLocation, location) <= maxPointerDrift {
       var updated = state ?? TapState()
       updated.secondPressAt = now
       tapStates[config.type] = updated
     } else {
-      tapStates[config.type] = TapState(firstPressAt: now, firstReleaseAt: nil, secondPressAt: nil)
+      tapStates[config.type] = TapState(firstPressAt: now, firstPressLocation: location, firstReleaseAt: nil, secondPressAt: nil)
     }
   }
 
@@ -1334,8 +1344,8 @@ final class DoubleTapActionManager {
 
     if let secondPress = state.secondPressAt {
       tapStates[config.type] = nil
-      guard (now - secondPress) <= maxTapDuration else { return }
-      guard NSEvent.pressedMouseButtons == 0, !ShortcutsManager.shared.hasActiveShortcut else { return }
+      guard (now - secondPress) <= maxTapDuration, NSEvent.pressedMouseButtons == 0 else { return }
+      if let firstLocation = state.firstPressLocation, distance(firstLocation, NSEvent.mouseLocation) > maxPointerDrift { return }
       fire(config.action)
     } else if let firstPress = state.firstPressAt, state.firstReleaseAt == nil {
       if (now - firstPress) <= maxTapDuration {
@@ -1347,6 +1357,10 @@ final class DoubleTapActionManager {
     } else {
       tapStates[config.type] = nil
     }
+  }
+
+  private func distance(_ a: NSPoint, _ b: NSPoint) -> CGFloat {
+    hypot(a.x - b.x, a.y - b.y)
   }
 
   private func fire(_ action: WindowSnapAction) {
