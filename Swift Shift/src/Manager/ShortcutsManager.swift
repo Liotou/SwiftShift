@@ -1167,13 +1167,18 @@ final class WindowSnapActionRunner {
     guard let liveFrame = WindowManager.getFrame(window: window),
           let visibleFrame = WindowManager.screenAXVisibleFrame(containing: liveFrame) else { return }
 
+    // Leave the same edge gap macOS uses when its "Tiled windows have margins"
+    // setting is on; go fully edge-to-edge otherwise.
+    let margin = WindowManager.tiledWindowMarginInset()
+    let maximizeTarget = margin > 0 ? visibleFrame.insetBy(dx: margin, dy: margin) : visibleFrame
+
     // If a glide for this window is still running, reason about its destination
     // rather than the half-way frame the window is currently at.
     let current = (animator.flatMap { CFEqual($0.window, window) ? $0.targetFrame : nil }) ?? liveFrame
 
     maximizedRecords.removeAll { !WindowManager.isAlive(window: $0.window) }
     let recordIndex = maximizedRecords.firstIndex { CFEqual($0.window, window) }
-    let isMaximized = rectsApproximatelyEqual(current, visibleFrame, tolerance: frameTolerance)
+    let isMaximized = rectsApproximatelyEqual(current, maximizeTarget, tolerance: frameTolerance)
 
     if isMaximized, let recordIndex {
       let restoreFrame = maximizedRecords.remove(at: recordIndex).restoreFrame
@@ -1190,7 +1195,7 @@ final class WindowSnapActionRunner {
       if maximizedRecords.count > maxRecords {
         maximizedRecords.removeFirst(maximizedRecords.count - maxRecords)
       }
-      animate(window, from: liveFrame, to: visibleFrame)
+      animate(window, from: liveFrame, to: maximizeTarget)
     }
   }
 

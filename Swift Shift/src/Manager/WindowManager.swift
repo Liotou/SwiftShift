@@ -191,6 +191,19 @@ class WindowManager {
                       height: rect.height)
     }
 
+    /// Point inset to leave around a maximized window when macOS's own
+    /// "Tiled windows have margins" setting is on (System Settings → Desktop & Dock).
+    /// Returns 0 when that setting is off or the OS predates window tiling.
+    static func tiledWindowMarginInset() -> CGFloat {
+        guard #available(macOS 15.0, *) else { return 0 }
+        let enabled = UserDefaults(suiteName: "com.apple.WindowManager")?
+            .object(forKey: "EnableTiledWindowMargins") as? Bool ?? true
+        return enabled ? tiledWindowMargin : 0
+    }
+
+    /// Gap macOS leaves between a tiled window and the screen edges (~8 pt).
+    private static let tiledWindowMargin: CGFloat = 8
+
     /// Visible frame (menu bar and Dock excluded), in AX coordinates, of the screen
     /// that holds the largest part of `axRect`.
     static func screenAXVisibleFrame(containing axRect: CGRect) -> CGRect? {
