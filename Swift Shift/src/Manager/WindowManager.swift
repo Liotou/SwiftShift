@@ -128,4 +128,90 @@ class WindowManager {
         let fixed = convertYCoordinateBecauseTheAreTwoFuckingCoordinateSystems(point: windowLocation)
         return WindowBounds(topLeft: fixed, topRight: NSPoint(x: fixed.x + windowSize.width, y: fixed.y), bottomLeft: NSPoint(x: fixed.x, y: fixed.y - windowSize.height), bottomRight: NSPoint(x: fixed.x + windowSize.width, y: fixed.y - windowSize.height))
     }
+
+    // MARK: - Maximize / minimize helpers
+
+    /// Full frame (AX top-left coordinate space) of a window, or nil if either read fails.
+    static func getFrame(window: AXUIElement) -> CGRect? {
+        guard let position = getPosition(window: window), let size = getSize(window: window) else { return nil }
+        return CGRect(origin: position, size: size)
+    }
+
+    /// Move + resize a window to an exact frame. Writes twice because some apps clamp
+    /// the position or size on the first pass (windows with size increments, or apps
+    /// that toggle `AXEnhancedUserInterface` while an AX client is attached).
+    @discardableResult
+    static func setFrame(window: AXUIElement, to frame: CGRect) -> Bool {
+        move(window: window, to: frame.origin)
+        _ = resize(window: window, to: frame.size, from: frame.origin, shouldMoveOrigin: true)
+        return resize(window: window, to: frame.size, from: frame.origin, shouldMoveOrigin: true)
+    }
+
+    @discardableResult
+    static func setMinimized(window: AXUIElement, _ minimized: Bool) -> AXError {
+        AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, (minimized ? kCFBooleanTrue : kCFBooleanFalse))
+    }
+
+    /// Whether the AX reference still points at a live window.
+    static func isAlive(window: AXUIElement) -> Bool {
+        var value: CFTypeRef?
+        return AXUIElementCopyAttributeValue(window, kAXRoleAttribute as CFString, &value) != .invalidUIElement
+    }
+
+    /// Convert an AppKit global rect (origin bottom-left of the primary screen, y up)
+    /// to the AX global rect used by `kAXPosition`/`kAXSize` (origin top-left, y down).
+    /// The transform is its own inverse.
+    static func axRect(fromAppKit rect: CGRect) -> CGRect {
+        guard let primary = NSScreen.screens.first else { return rect }
+        let primaryHeight = primary.frame.height
+        return CGRect(x: rect.origin.x,
+                      y: primaryHeight - rect.origin.y - rect.height,
+                      width: rect.width,
+                      height: rect.height)
+    }
+
+    /// Visible frame (menu bar and Dock excluded), in AX coordinates, of the screen
+    /// that holds the largest part of `axRect`.
+    static func screenAXVisibleFrame(containing axRect: CGRect) -> CGRect? {
+        let screens = NSScreen.screens
+        guard !screens.isEmpty else { return nil }
+
+        var best: (screen: NSScreen, area: CGFloat)?
+        for screen in screens {
+            let frameAX = self.axRect(fromAppKit: screen.frame)
+            let intersection = frameAX.intersection(axRect)
+            let area = intersection.isNull ? 0 : intersection.width * intersection.height
+            if best == nil || area > best!.area {
+                best = (screen, area)
+            }
+        }
+
+        guard let chosen = best?.screen else { return nil }
+        return self.axRect(fromAppKit: chosen.visibleFrame)
+    }
+
+    /// The focused window of the frontmost app, used as a fallback when the cursor
+    /// is not over a window. Skips our own app and ignored apps.
+    static func getFocusedWindow() -> AXUIElement? {
+        let system = AXUIElementCreateSystemWide()
+
+        var appValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(system, kAXFocusedApplicationAttribute as CFString, &appValue) == .success,
+              let appValue, CFGetTypeID(appValue) == AXUIElementGetTypeID() else { return nil }
+        let app = appValue as! AXUIElement
+
+        var windowValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &windowValue) == .success,
+              let windowValue, CFGetTypeID(windowValue) == AXUIElementGetTypeID() else { return nil }
+        let window = windowValue as! AXUIElement
+
+        var pid: pid_t = 0
+        AXUIElementGetPid(window, &pid)
+        guard pid != NSRunningApplication.current.processIdentifier else { return nil }
+        if let bundleId = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier,
+           PreferencesManager.isAppIgnored(bundleId) {
+            return nil
+        }
+        return window
+    }
 }

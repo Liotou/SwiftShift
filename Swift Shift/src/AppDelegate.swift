@@ -14,6 +14,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
   func applicationDidFinishLaunching(_ notification: Notification) {
     let _ = ShortcutsManager.shared // immediately register shortcuts so we won't wait for the UI
     MouseChordActionManager.shared.updateSubscriptions()
+    DoubleTapActionManager.shared.updateSubscriptions()
   }
   
   func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -25,5 +26,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     shortcutMonitor?.removeAllActions()
     ShortcutsManager.shared.cleanupAllShortcuts()
     MouseChordActionManager.shared.cleanup()
+    DoubleTapActionManager.shared.cleanup()
   }
 }

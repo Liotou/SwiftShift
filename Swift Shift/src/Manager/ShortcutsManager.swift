@@ -273,6 +273,7 @@ class ShortcutsManager {
     CGEventSupervisor.shared.cancelAll()
     updateGlobalShortcuts()
     MouseChordActionManager.shared.forceRebuild()
+    DoubleTapActionManager.shared.forceRebuild()
   }
 
   private func handleSpaceChange() {
@@ -330,6 +331,7 @@ class ShortcutsManager {
 
     updateGlobalShortcuts()
     MouseChordActionManager.shared.updateSubscriptions()
+    DoubleTapActionManager.shared.updateSubscriptions()
     NotificationCenter.default.post(name: .shortcutsDidChange, object: userShortcut.type)
   }
 
@@ -380,6 +382,7 @@ class ShortcutsManager {
     UserDefaults.standard.removeObject(forKey: mouseEnabledKey(for: type))
     updateGlobalShortcuts()
     MouseChordActionManager.shared.updateSubscriptions()
+    DoubleTapActionManager.shared.updateSubscriptions()
     NotificationCenter.default.post(name: .shortcutsDidChange, object: type)
   }
 
@@ -1102,5 +1105,253 @@ class MouseChordActionManager {
     }
 
     return nil
+  }
+}
+
+// MARK: - Double-tap modifier actions
+
+enum WindowSnapAction {
+  /// Fill the screen; a second trigger on an already-maximized window restores it.
+  case toggleMaximize
+  /// Minimize the window to the Dock.
+  case minimize
+}
+
+/// Applies `WindowSnapAction`s to the window under the cursor (falling back to the
+/// focused window). Keeps a small history of pre-maximize frames so the maximize
+/// action can toggle back to where the window was.
+final class WindowSnapActionRunner {
+  static let shared = WindowSnapActionRunner()
+  private init() {}
+
+  private struct MaximizedRecord {
+    let window: AXUIElement
+    let restoreFrame: CGRect
+  }
+
+  private var maximizedRecords: [MaximizedRecord] = []
+  private let maxRecords = 12
+  /// Frames within this many points of the screen's visible frame count as "maximized".
+  private let frameTolerance: CGFloat = 4
+
+  func perform(_ action: WindowSnapAction) {
+    guard let window = targetWindow() else {
+      NSSound.beep()
+      return
+    }
+
+    switch action {
+    case .toggleMaximize:
+      toggleMaximize(window)
+    case .minimize:
+      WindowManager.setMinimized(window: window, true)
+    }
+  }
+
+  private func targetWindow() -> AXUIElement? {
+    if let underCursor = WindowManager.getCurrentWindow(), !isIgnored(underCursor) {
+      return underCursor
+    }
+    return WindowManager.getFocusedWindow()
+  }
+
+  private func isIgnored(_ window: AXUIElement) -> Bool {
+    guard let app = WindowManager.getNSApplication(from: window), let bundleId = app.bundleIdentifier else { return false }
+    return PreferencesManager.isAppIgnored(bundleId)
+  }
+
+  private func toggleMaximize(_ window: AXUIElement) {
+    guard let current = WindowManager.getFrame(window: window),
+          let visibleFrame = WindowManager.screenAXVisibleFrame(containing: current) else { return }
+
+    maximizedRecords.removeAll { !WindowManager.isAlive(window: $0.window) }
+    let recordIndex = maximizedRecords.firstIndex { CFEqual($0.window, window) }
+    let isMaximized = rectsApproximatelyEqual(current, visibleFrame, tolerance: frameTolerance)
+
+    if isMaximized, let recordIndex {
+      let restoreFrame = maximizedRecords.remove(at: recordIndex).restoreFrame
+      WindowManager.setFrame(window: window, to: restoreFrame)
+    } else if isMaximized {
+      // Maximized by some other means and we have nothing to restore to —
+      // fall back to a centered window at 60% of the visible frame.
+      let size = CGSize(width: visibleFrame.width * 0.6, height: visibleFrame.height * 0.6)
+      let origin = CGPoint(x: visibleFrame.midX - size.width / 2, y: visibleFrame.midY - size.height / 2)
+      WindowManager.setFrame(window: window, to: CGRect(origin: origin, size: size))
+    } else {
+      if let recordIndex { maximizedRecords.remove(at: recordIndex) }
+      maximizedRecords.append(MaximizedRecord(window: window, restoreFrame: current))
+      if maximizedRecords.count > maxRecords {
+        maximizedRecords.removeFirst(maximizedRecords.count - maxRecords)
+      }
+      WindowManager.setFrame(window: window, to: visibleFrame)
+    }
+  }
+
+  private func rectsApproximatelyEqual(_ a: CGRect, _ b: CGRect, tolerance: CGFloat) -> Bool {
+    abs(a.origin.x - b.origin.x) <= tolerance &&
+    abs(a.origin.y - b.origin.y) <= tolerance &&
+    abs(a.width - b.width) <= tolerance &&
+    abs(a.height - b.height) <= tolerance
+  }
+}
+
+/// Detects a quick double-tap of a modifier-only Move/Resize shortcut and runs the
+/// matching `WindowSnapAction`. A single press-hold (the normal drag gesture) never
+/// looks like a double-tap: both taps must be short and close together, with no
+/// other key, no mouse button, and no active drag in between.
+final class DoubleTapActionManager {
+  static let shared = DoubleTapActionManager()
+  private init() {}
+
+  private struct Config {
+    let type: ShortcutType
+    let flags: NSEvent.ModifierFlags
+    let action: WindowSnapAction
+  }
+
+  private struct TapState {
+    var firstPressAt: TimeInterval?
+    var firstReleaseAt: TimeInterval?
+    var secondPressAt: TimeInterval?
+  }
+
+  private var monitors: [Any] = []
+  private var configs: [Config] = []
+  private var tapStates: [ShortcutType: TapState] = [:]
+  private var lastMatched: [ShortcutType: Bool] = [:]
+
+  /// Each tap must be shorter than this, and the gap between them smaller still —
+  /// values a deliberate double-tap clears easily but a hold never does.
+  private let maxTapDuration: TimeInterval = 0.25
+  private let maxGapBetweenTaps: TimeInterval = 0.30
+
+  func updateSubscriptions() {
+    teardown()
+
+    guard PreferencesManager.loadBool(for: .doubleTapModifierActions) else { return }
+    configs = Self.loadConfigs()
+    guard !configs.isEmpty else { return }
+
+    let mask: NSEvent.EventTypeMask = [.flagsChanged, .keyDown, .leftMouseDown, .rightMouseDown]
+    let handler: (NSEvent) -> Void = { [weak self] event in self?.handle(event) }
+
+    if let monitor = NSEvent.addGlobalMonitorForEvents(matching: mask, handler: handler) {
+      monitors.append(monitor)
+    }
+    if let monitor = NSEvent.addLocalMonitorForEvents(matching: mask, handler: { event in
+      handler(event)
+      return event
+    }) {
+      monitors.append(monitor)
+    }
+  }
+
+  /// Full teardown + rebuild, for use after system events that can kill input hooks.
+  func forceRebuild() {
+    updateSubscriptions()
+  }
+
+  func cleanup() {
+    teardown()
+  }
+
+  private func teardown() {
+    for monitor in monitors { NSEvent.removeMonitor(monitor) }
+    monitors.removeAll()
+    tapStates.removeAll()
+    lastMatched.removeAll()
+    configs.removeAll()
+  }
+
+  private static func loadConfigs() -> [Config] {
+    var result: [Config] = []
+    for type in ShortcutType.allCases {
+      guard let userShortcut = ShortcutsManager.shared.load(for: type),
+            userShortcut.keyboardEnabled,
+            let keyboardShortcut = userShortcut.keyboardShortcut,
+            keyboardShortcut.isModifierOnly else { continue }
+
+      let flags = keyboardShortcut.modifierFlags
+      guard !flags.isEmpty else { continue }
+
+      result.append(Config(type: type, flags: flags, action: type == .resize ? .toggleMaximize : .minimize))
+    }
+    return result
+  }
+
+  private func handle(_ event: NSEvent) {
+    switch event.type {
+    case .flagsChanged:
+      handleFlagsChanged(event)
+    case .keyDown, .leftMouseDown, .rightMouseDown:
+      // A real keystroke or click means this isn't a bare double-tap.
+      tapStates.removeAll()
+    default:
+      break
+    }
+  }
+
+  private func handleFlagsChanged(_ event: NSEvent) {
+    let now = event.timestamp
+    let currentFlags = event.modifierFlags.swiftShiftShortcutFlags
+
+    for config in configs {
+      let matched = currentFlags == config.flags
+      let previouslyMatched = lastMatched[config.type] ?? false
+      lastMatched[config.type] = matched
+
+      if matched && !previouslyMatched {
+        handlePress(config, now: now)
+      } else if !matched && previouslyMatched {
+        handleRelease(config, now: now)
+      }
+    }
+  }
+
+  private func handlePress(_ config: Config, now: TimeInterval) {
+    // A held mouse button or an in-progress SwiftShift drag means this modifier
+    // press is the start of a gesture, not a tap.
+    guard NSEvent.pressedMouseButtons == 0, !ShortcutsManager.shared.hasActiveShortcut else {
+      tapStates[config.type] = nil
+      return
+    }
+
+    let state = tapStates[config.type]
+    if let firstPress = state?.firstPressAt,
+       let firstRelease = state?.firstReleaseAt,
+       (firstRelease - firstPress) <= maxTapDuration,
+       (now - firstRelease) <= maxGapBetweenTaps {
+      var updated = state ?? TapState()
+      updated.secondPressAt = now
+      tapStates[config.type] = updated
+    } else {
+      tapStates[config.type] = TapState(firstPressAt: now, firstReleaseAt: nil, secondPressAt: nil)
+    }
+  }
+
+  private func handleRelease(_ config: Config, now: TimeInterval) {
+    guard var state = tapStates[config.type] else { return }
+
+    if let secondPress = state.secondPressAt {
+      tapStates[config.type] = nil
+      guard (now - secondPress) <= maxTapDuration else { return }
+      guard NSEvent.pressedMouseButtons == 0, !ShortcutsManager.shared.hasActiveShortcut else { return }
+      fire(config.action)
+    } else if let firstPress = state.firstPressAt, state.firstReleaseAt == nil {
+      if (now - firstPress) <= maxTapDuration {
+        state.firstReleaseAt = now
+        tapStates[config.type] = state
+      } else {
+        tapStates[config.type] = nil
+      }
+    } else {
+      tapStates[config.type] = nil
+    }
+  }
+
+  private func fire(_ action: WindowSnapAction) {
+    DispatchQueue.main.async {
+      WindowSnapActionRunner.shared.perform(action)
+    }
   }
 }

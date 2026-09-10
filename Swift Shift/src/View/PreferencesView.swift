@@ -36,6 +36,7 @@ struct PreferencesView: View {
   @AppStorage(PreferenceKey.focusOnApp.rawValue) private var focusOnApp = true
   @AppStorage(PreferenceKey.useQuadrants.rawValue) private var useQuadrants = false
   @AppStorage(PreferenceKey.snapToWindows.rawValue) private var snapToWindows = true
+  @AppStorage(PreferenceKey.doubleTapModifierActions.rawValue) private var doubleTapModifierActions = false
 
   var body: some View {
     VStack(alignment: .leading, spacing: 8) {
@@ -81,6 +82,16 @@ struct PreferencesView: View {
         subtitle: "Add resistance near window edges",
         icon: "macwindow.on.rectangle"
       )
+
+      PreferenceToggle(
+        isOn: $doubleTapModifierActions,
+        title: "Double-tap modifier keys",
+        subtitle: "Resize key maximizes · Move key minimizes",
+        icon: "hand.tap"
+      )
+      .onChange(of: doubleTapModifierActions) { _ in
+        DoubleTapActionManager.shared.updateSubscriptions()
+      }
     }
   }
 }

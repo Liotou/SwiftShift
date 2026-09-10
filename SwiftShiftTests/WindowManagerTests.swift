@@ -1,4 +1,5 @@
 import XCTest
+import AppKit
 @testable import Swift_Shift_Dev
 
 final class WindowManagerTests: XCTestCase {
@@ -79,6 +80,38 @@ final class WindowManagerTests: XCTestCase {
         XCTAssertEqual(bounds.bottomLeft.y, displayHeight, accuracy: 0.01)
         XCTAssertEqual(bounds.bottomRight.x, 0, accuracy: 0.01)
         XCTAssertEqual(bounds.bottomRight.y, displayHeight, accuracy: 0.01)
+    }
+
+    // MARK: - AX rect conversion (maximize helpers)
+
+    func testAxRectFromAppKit_preservesXAndSize() {
+        let appKit = CGRect(x: 120, y: 80, width: 640, height: 400)
+        let ax = WindowManager.axRect(fromAppKit: appKit)
+
+        XCTAssertEqual(ax.origin.x, appKit.origin.x, accuracy: 0.01)
+        XCTAssertEqual(ax.width, appKit.width, accuracy: 0.01)
+        XCTAssertEqual(ax.height, appKit.height, accuracy: 0.01)
+    }
+
+    func testAxRectFromAppKit_isItsOwnInverse() {
+        let appKit = CGRect(x: 33, y: 210, width: 500, height: 300)
+        let roundTrip = WindowManager.axRect(fromAppKit: WindowManager.axRect(fromAppKit: appKit))
+
+        XCTAssertEqual(roundTrip.origin.x, appKit.origin.x, accuracy: 0.01)
+        XCTAssertEqual(roundTrip.origin.y, appKit.origin.y, accuracy: 0.01)
+        XCTAssertEqual(roundTrip.width, appKit.width, accuracy: 0.01)
+        XCTAssertEqual(roundTrip.height, appKit.height, accuracy: 0.01)
+    }
+
+    func testAxRectFromAppKit_flipsYRelativeToPrimaryHeight() throws {
+        guard let primaryHeight = NSScreen.screens.first?.frame.height else {
+            throw XCTSkip("No screen available in the test host")
+        }
+        let appKit = CGRect(x: 0, y: 0, width: 200, height: 100)
+        let ax = WindowManager.axRect(fromAppKit: appKit)
+
+        // AppKit origin bottom-left → AX origin top-left: y = H - originY - height
+        XCTAssertEqual(ax.origin.y, primaryHeight - 100, accuracy: 0.01)
     }
 
     // MARK: - Window Bounds Structure

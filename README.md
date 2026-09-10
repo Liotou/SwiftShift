@@ -27,6 +27,7 @@ There are several ways:
 * Hide menubar icon
 * Focus on window
 * Smart resizing with quadrants
+* Double-tap a modifier key to maximize/restore (Resize key) or minimize (Move key) the window under the cursor
 * Ignore custom apps
 
 ### Quadrants

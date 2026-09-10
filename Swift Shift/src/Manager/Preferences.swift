@@ -7,6 +7,7 @@ enum PreferenceKey: String {
     case snapToWindows = "snapToWindows"
     case requireMouseClick = "requireMouseClick"
     case moveWithBothMouseButtons = "moveWithBothMouseButtons"
+    case doubleTapModifierActions = "doubleTapModifierActions"
     case fnShortcutWarningDismissed = "fnShortcutWarningDismissed"
     case ignoredApps = "ignoredApps"
     case didMigrateDefaultIgnoredApps = "didMigrateDefaultIgnoredApps"
