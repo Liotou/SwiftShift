@@ -158,6 +158,27 @@ class WindowManager {
         return AXUIElementCopyAttributeValue(window, kAXRoleAttribute as CFString, &value) != .invalidUIElement
     }
 
+    private static let enhancedUIAttribute = "AXEnhancedUserInterface" as CFString
+
+    /// Reads `AXEnhancedUserInterface` on the app owning `window`. Chromium/Electron
+    /// apps turn this on while an AX client is attached, which makes `kAXPosition` /
+    /// `kAXSize` writes slow and non-live — turning it off for the duration of an
+    /// animated resize keeps the motion smooth. Returns the app element plus whether
+    /// the attribute was on, so the caller can restore it afterwards.
+    static func enhancedUIState(forAppOf window: AXUIElement) -> (app: AXUIElement, wasEnabled: Bool)? {
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(window, &pid) == .success, pid > 0 else { return nil }
+        let app = AXUIElementCreateApplication(pid)
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(app, enhancedUIAttribute, &value) == .success,
+              let value, CFGetTypeID(value) == CFBooleanGetTypeID() else { return (app, false) }
+        return (app, CFBooleanGetValue((value as! CFBoolean)))
+    }
+
+    static func setEnhancedUI(_ enabled: Bool, forApp app: AXUIElement) {
+        AXUIElementSetAttributeValue(app, enhancedUIAttribute, enabled ? kCFBooleanTrue : kCFBooleanFalse)
+    }
+
     /// Convert an AppKit global rect (origin bottom-left of the primary screen, y up)
     /// to the AX global rect used by `kAXPosition`/`kAXSize` (origin top-left, y down).
     /// The transform is its own inverse.

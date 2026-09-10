@@ -1133,6 +1133,9 @@ final class WindowSnapActionRunner {
   private let maxRecords = 12
   /// Frames within this many points of the screen's visible frame count as "maximized".
   private let frameTolerance: CGFloat = 4
+  /// How long the maximize / restore glide takes.
+  private let animationDuration: TimeInterval = 0.18
+  private var animator: WindowFrameAnimator?
 
   func perform(_ action: WindowSnapAction) {
     guard let window = targetWindow() else {
@@ -1161,8 +1164,12 @@ final class WindowSnapActionRunner {
   }
 
   private func toggleMaximize(_ window: AXUIElement) {
-    guard let current = WindowManager.getFrame(window: window),
-          let visibleFrame = WindowManager.screenAXVisibleFrame(containing: current) else { return }
+    guard let liveFrame = WindowManager.getFrame(window: window),
+          let visibleFrame = WindowManager.screenAXVisibleFrame(containing: liveFrame) else { return }
+
+    // If a glide for this window is still running, reason about its destination
+    // rather than the half-way frame the window is currently at.
+    let current = (animator.flatMap { CFEqual($0.window, window) ? $0.targetFrame : nil }) ?? liveFrame
 
     maximizedRecords.removeAll { !WindowManager.isAlive(window: $0.window) }
     let recordIndex = maximizedRecords.firstIndex { CFEqual($0.window, window) }
@@ -1170,20 +1177,36 @@ final class WindowSnapActionRunner {
 
     if isMaximized, let recordIndex {
       let restoreFrame = maximizedRecords.remove(at: recordIndex).restoreFrame
-      WindowManager.setFrame(window: window, to: restoreFrame)
+      animate(window, from: liveFrame, to: restoreFrame)
     } else if isMaximized {
       // Maximized by some other means and we have nothing to restore to —
       // fall back to a centered window at 60% of the visible frame.
       let size = CGSize(width: visibleFrame.width * 0.6, height: visibleFrame.height * 0.6)
       let origin = CGPoint(x: visibleFrame.midX - size.width / 2, y: visibleFrame.midY - size.height / 2)
-      WindowManager.setFrame(window: window, to: CGRect(origin: origin, size: size))
+      animate(window, from: liveFrame, to: CGRect(origin: origin, size: size))
     } else {
       if let recordIndex { maximizedRecords.remove(at: recordIndex) }
       maximizedRecords.append(MaximizedRecord(window: window, restoreFrame: current))
       if maximizedRecords.count > maxRecords {
         maximizedRecords.removeFirst(maximizedRecords.count - maxRecords)
       }
-      WindowManager.setFrame(window: window, to: visibleFrame)
+      animate(window, from: liveFrame, to: visibleFrame)
+    }
+  }
+
+  private func animate(_ window: AXUIElement, from start: CGRect, to target: CGRect) {
+    animator?.cancel()
+
+    guard !rectsApproximatelyEqual(start, target, tolerance: 1) else {
+      WindowManager.setFrame(window: window, to: target)
+      animator = nil
+      return
+    }
+
+    let animator = WindowFrameAnimator(window: window, from: start, to: target, duration: animationDuration)
+    self.animator = animator
+    animator.start { [weak self] in
+      if self?.animator === animator { self?.animator = nil }
     }
   }
 
@@ -1192,6 +1215,94 @@ final class WindowSnapActionRunner {
     abs(a.origin.y - b.origin.y) <= tolerance &&
     abs(a.width - b.width) <= tolerance &&
     abs(a.height - b.height) <= tolerance
+  }
+}
+
+/// Glides a window from one frame to another over `duration` with an ease-out curve.
+/// AppKit has no API to animate another app's window, so this interpolates frame by
+/// frame and pushes each step through `AXWindowWriter` (background serial queue,
+/// latest-wins), which keeps the main thread from blocking on slow AX IPC.
+final class WindowFrameAnimator {
+  let window: AXUIElement
+  let targetFrame: CGRect
+
+  private let startFrame: CGRect
+  private let duration: TimeInterval
+  private var startedAt: TimeInterval = 0
+  private var timer: Timer?
+  private var onFinish: (() -> Void)?
+  private var enhancedUIApp: AXUIElement?
+  private var enhancedUIWasEnabled = false
+
+  init(window: AXUIElement, from: CGRect, to: CGRect, duration: TimeInterval) {
+    self.window = window
+    self.startFrame = from
+    self.targetFrame = to
+    self.duration = duration
+  }
+
+  func start(onFinish: @escaping () -> Void) {
+    self.onFinish = onFinish
+
+    if let state = WindowManager.enhancedUIState(forAppOf: window) {
+      enhancedUIApp = state.app
+      enhancedUIWasEnabled = state.wasEnabled
+      if state.wasEnabled { WindowManager.setEnhancedUI(false, forApp: state.app) }
+    }
+
+    AXWindowWriter.shared.beginGesture(window: window, origin: startFrame.origin, size: startFrame.size)
+    startedAt = ProcessInfo.processInfo.systemUptime
+
+    let timer = Timer(timeInterval: 1.0 / 90.0, repeats: true) { [weak self] _ in self?.tick() }
+    RunLoop.main.add(timer, forMode: .common)
+    self.timer = timer
+    tick()
+  }
+
+  /// Stops the glide immediately, leaving the window wherever it currently is.
+  func cancel() {
+    guard timer != nil else { return }
+    timer?.invalidate()
+    timer = nil
+    AXWindowWriter.shared.endGesture()
+    restoreEnhancedUI()
+    onFinish = nil
+  }
+
+  private func tick() {
+    let elapsed = ProcessInfo.processInfo.systemUptime - startedAt
+    let t = duration > 0 ? min(1, max(0, elapsed / duration)) : 1
+    let eased = CGFloat(1 - pow(1 - t, 3)) // ease-out cubic
+
+    let frame = CGRect(
+      x: startFrame.origin.x + (targetFrame.origin.x - startFrame.origin.x) * eased,
+      y: startFrame.origin.y + (targetFrame.origin.y - startFrame.origin.y) * eased,
+      width: startFrame.width + (targetFrame.width - startFrame.width) * eased,
+      height: startFrame.height + (targetFrame.height - startFrame.height) * eased
+    )
+    AXWindowWriter.shared.requestResize(origin: frame.origin, size: frame.size)
+
+    if t >= 1 { finish() }
+  }
+
+  private func finish() {
+    guard timer != nil else { return }
+    timer?.invalidate()
+    timer = nil
+    AXWindowWriter.shared.requestResize(origin: targetFrame.origin, size: targetFrame.size)
+    AXWindowWriter.shared.endGesture()
+    restoreEnhancedUI()
+    let callback = onFinish
+    onFinish = nil
+    callback?()
+  }
+
+  private func restoreEnhancedUI() {
+    if let app = enhancedUIApp, enhancedUIWasEnabled {
+      WindowManager.setEnhancedUI(true, forApp: app)
+    }
+    enhancedUIApp = nil
+    enhancedUIWasEnabled = false
   }
 }
 
