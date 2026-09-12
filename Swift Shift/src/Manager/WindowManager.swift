@@ -152,10 +152,18 @@ class WindowManager {
         AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, (minimized ? kCFBooleanTrue : kCFBooleanFalse))
     }
 
-    /// Whether the AX reference still points at a live window.
+    /// Whether the AX reference still points at a live, responsive window.
+    /// Bounds the messaging timeout so a hung (not terminated) owning app can't
+    /// stall this for the full multi-second AX default — callers may probe
+    /// several stored references in a row. Any error, not just
+    /// `.invalidUIElement`, is treated as "not alive": a stored reference that
+    /// can't be read is no more useful than a dead one.
     static func isAlive(window: AXUIElement) -> Bool {
+        AXUIElementSetMessagingTimeout(window, 0.15)
         var value: CFTypeRef?
-        return AXUIElementCopyAttributeValue(window, kAXRoleAttribute as CFString, &value) != .invalidUIElement
+        let result = AXUIElementCopyAttributeValue(window, kAXRoleAttribute as CFString, &value)
+        AXUIElementSetMessagingTimeout(window, 0) // restore the global default
+        return result == .success
     }
 
     private static let enhancedUIAttribute = "AXEnhancedUserInterface" as CFString

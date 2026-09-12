@@ -1127,6 +1127,10 @@ final class WindowSnapActionRunner {
   private struct MaximizedRecord {
     let window: AXUIElement
     let restoreFrame: CGRect
+    /// The frame this window was maximized to, so a later change to the computed
+    /// target (Dock moves, resolution changes, tiling margins toggled) doesn't
+    /// make the window look "not maximized" and discard the true restore frame.
+    let maximizedFrame: CGRect
   }
 
   private var maximizedRecords: [MaximizedRecord] = []
@@ -1178,7 +1182,18 @@ final class WindowSnapActionRunner {
 
     maximizedRecords.removeAll { !WindowManager.isAlive(window: $0.window) }
     let recordIndex = maximizedRecords.firstIndex { CFEqual($0.window, window) }
-    let isMaximized = rectsApproximatelyEqual(current, maximizeTarget, tolerance: frameTolerance)
+
+    // Trust an existing record's own maximized frame over a freshly computed
+    // target: the screen's visible frame can change after a window was
+    // maximized (Dock moves, resolution changes, tiling margins toggled)
+    // without the window itself moving. Comparing against a drifted target
+    // would otherwise look like "not maximized" and discard the restore frame.
+    let isMaximized: Bool
+    if let recordIndex {
+      isMaximized = rectsApproximatelyEqual(current, maximizedRecords[recordIndex].maximizedFrame, tolerance: frameTolerance)
+    } else {
+      isMaximized = rectsApproximatelyEqual(current, maximizeTarget, tolerance: frameTolerance)
+    }
 
     if isMaximized, let recordIndex {
       let restoreFrame = maximizedRecords.remove(at: recordIndex).restoreFrame
@@ -1191,12 +1206,20 @@ final class WindowSnapActionRunner {
       animate(window, from: liveFrame, to: CGRect(origin: origin, size: size))
     } else {
       if let recordIndex { maximizedRecords.remove(at: recordIndex) }
-      maximizedRecords.append(MaximizedRecord(window: window, restoreFrame: current))
+      maximizedRecords.append(MaximizedRecord(window: window, restoreFrame: current, maximizedFrame: maximizeTarget))
       if maximizedRecords.count > maxRecords {
         maximizedRecords.removeFirst(maximizedRecords.count - maxRecords)
       }
       animate(window, from: liveFrame, to: maximizeTarget)
     }
+  }
+
+  /// Cancels any running maximize/restore glide, leaving the window wherever it
+  /// currently is. Call before starting a real move/resize gesture — both share
+  /// `AXWindowWriter`, and letting them overlap would resize the wrong window.
+  func cancelAnimation() {
+    animator?.cancel()
+    animator = nil
   }
 
   private func animate(_ window: AXUIElement, from start: CGRect, to target: CGRect) {
@@ -1426,9 +1449,18 @@ final class DoubleTapActionManager {
       let previouslyMatched = lastMatched[config.type] ?? false
       lastMatched[config.type] = matched
 
-      if matched && !previouslyMatched {
+      guard matched != previouslyMatched else { continue }
+
+      if matched {
         handlePress(config, now: now)
-      } else if !matched && previouslyMatched {
+      } else if currentFlags.isSuperset(of: config.flags) {
+        // The configured modifier(s) are still physically held; an unrelated
+        // modifier joined in (e.g. Move = ⌥ and Resize = ⌥⇧: pressing ⇧ while ⌥
+        // is down makes Move's exact-flags match go false). That's contamination,
+        // not a release — abort instead of counting it as the tap ending, or
+        // releasing ⌥ afterwards would fire a double-tap that never happened.
+        tapStates[config.type] = nil
+      } else {
         handleRelease(config, now: now)
       }
     }

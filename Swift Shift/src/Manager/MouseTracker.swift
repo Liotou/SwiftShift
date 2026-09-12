@@ -100,6 +100,10 @@ class MouseTracker {
         }
     }
     private func prepareTracking(for action: MouseAction, mouseLocation: NSPoint, coordinateSpace: MouseLocationCoordinateSpace) {
+        // A double-tap maximize/restore glide shares AXWindowWriter with this
+        // gesture. Cancel it first so an in-flight animation can't keep writing
+        // frames for the wrong window (or detach the writer mid-drag when it finishes).
+        WindowSnapActionRunner.shared.cancelAnimation()
         mouseLocationCoordinateSpace = coordinateSpace
         let currentWindow = coordinateSpace == .coreGraphics ? WindowManager.getCurrentWindow(at: mouseLocation) : WindowManager.getCurrentWindow()
         guard let currentWindow = currentWindow, !shouldIgnore(window: currentWindow) else { trackedWindow = nil; return }
