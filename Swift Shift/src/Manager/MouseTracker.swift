@@ -62,20 +62,24 @@ class MouseTracker {
     /// tracked window belongs to another app and won't show one on its own.
     /// `NSCursor.set()` is only honored for the frontmost app — SwiftShift never
     /// becomes frontmost during a gesture (that would steal keyboard focus from
-    /// the window being dragged), so the system won't display a cursor we set
-    /// directly. Instead we hide the real cursor and draw our own image in a
-    /// tiny always-on-top, click-through window that follows the pointer; any
-    /// app, frontmost or not, can show a window. Repositioned on every tracked
-    /// mouse-moved event (see `updateTracking`) to track the pointer.
+    /// the window being dragged) — so instead we hide the real cursor and draw
+    /// our own image in a tiny always-on-top, click-through window that follows
+    /// the pointer; any app, frontmost or not, can show a window. Hiding uses
+    /// `CGDisplayHideCursor`, not `NSCursor.hide()`: the latter is an AppKit
+    /// convenience that (like `.set()`) only reliably hides the cursor for the
+    /// frontmost app, which left both the real and overlay cursors visible at
+    /// once. `CGDisplayHideCursor` operates at the Window Server / display level
+    /// and works regardless of which app is active. Repositioned on every
+    /// tracked mouse-moved event (see `updateTracking`) to track the pointer.
     private func applyCursor() {
         guard isTracking else { return }
-        if !isSystemCursorHidden { NSCursor.hide(); isSystemCursorHidden = true }
+        if !isSystemCursorHidden { CGDisplayHideCursor(CGMainDisplayID()); isSystemCursorHidden = true }
         cursorOverlay.show(cursor(for: currentAction), at: NSEvent.mouseLocation)
     }
     private func resetCursor() {
         guard isSystemCursorHidden else { return }
         cursorOverlay.hide()
-        NSCursor.unhide()
+        CGDisplayShowCursor(CGMainDisplayID())
         isSystemCursorHidden = false
     }
     private func cursor(for action: MouseAction) -> NSCursor {
