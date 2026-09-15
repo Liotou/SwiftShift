@@ -21,6 +21,8 @@ class MouseTracker {
     private var enhancedUIPrev: Bool?
     private var cursorBeforeGesture: NSCursor?
     private var isOverridingCursor = false
+    private var pinnedCursor: NSCursor?
+    private var cursorPinTimer: Timer?
     private init() { registerForSpaceChangeNotifications() }
     deinit { unregisterForSpaceChangeNotifications() }
     private func registerForSpaceChangeNotifications() {
@@ -65,9 +67,14 @@ class MouseTracker {
     /// SwiftShift never becomes frontmost during a gesture (that would steal
     /// keyboard focus from the window being dragged).
     ///
-    /// Re-applied on every tracked mouse-moved event (see `updateTracking`),
-    /// because the app under the pointer re-asserts its own cursor rects as the
-    /// mouse moves across it; last writer wins, so we simply keep writing.
+    /// The app under the pointer re-asserts its own cursor rects as the pointer
+    /// moves across it — and while a window is being dragged, its views slide
+    /// under a stationary pointer, so it does that constantly. Both of us write
+    /// the cursor in reaction to the same mouse-moved event and the last writer
+    /// wins, which alternates and reads as flicker. So rather than only writing
+    /// on each event, pin the cursor for the whole gesture: a frame-rate timer
+    /// re-applies it, bounding how long a competing cursor can stay on screen to
+    /// well under one frame.
     private func applyCursor() {
         guard isTracking else { return }
         BackgroundCursor.enable()
@@ -77,9 +84,27 @@ class MouseTracker {
             cursorBeforeGesture = NSCursor.currentSystem
             isOverridingCursor = true
         }
-        cursor(for: currentAction).set()
+        let cursor = cursor(for: currentAction)
+        pinnedCursor = cursor
+        cursor.set()
+        startCursorPinTimer()
+    }
+    private func startCursorPinTimer() {
+        guard cursorPinTimer == nil else { return }
+        let timer = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in
+            // Reads `pinnedCursor` rather than recomputing from `currentAction`,
+            // which `stopTracking` clears before the cursor is handed back.
+            guard let self, self.isOverridingCursor, let cursor = self.pinnedCursor else { return }
+            cursor.set()
+        }
+        timer.tolerance = 0
+        RunLoop.main.add(timer, forMode: .common)
+        cursorPinTimer = timer
     }
     private func resetCursor() {
+        cursorPinTimer?.invalidate()
+        cursorPinTimer = nil
+        pinnedCursor = nil
         guard isOverridingCursor else { return }
         isOverridingCursor = false
         (cursorBeforeGesture ?? .arrow).set()
