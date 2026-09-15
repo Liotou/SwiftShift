@@ -22,7 +22,7 @@ class MouseTracker {
     private var cursorBeforeGesture: NSCursor?
     private var isOverridingCursor = false
     private var pinnedCursor: NSCursor?
-    private var cursorPinTimer: Timer?
+    private var cursorPinTimer: DispatchSourceTimer?
     private init() { registerForSpaceChangeNotifications() }
     deinit { unregisterForSpaceChangeNotifications() }
     private func registerForSpaceChangeNotifications() {
@@ -89,20 +89,25 @@ class MouseTracker {
         cursor.set()
         startCursorPinTimer()
     }
+    /// Re-applies the pinned cursor well above display refresh rate. A `Timer`
+    /// coalesces and is bound to run loop modes; a dispatch timer with no leeway
+    /// keeps firing at a steady rate through event tracking, which is exactly
+    /// when a drag is happening.
     private func startCursorPinTimer() {
         guard cursorPinTimer == nil else { return }
-        let timer = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now(), repeating: 1.0 / 240.0, leeway: .nanoseconds(0))
+        timer.setEventHandler { [weak self] in
             // Reads `pinnedCursor` rather than recomputing from `currentAction`,
             // which `stopTracking` clears before the cursor is handed back.
             guard let self, self.isOverridingCursor, let cursor = self.pinnedCursor else { return }
             cursor.set()
         }
-        timer.tolerance = 0
-        RunLoop.main.add(timer, forMode: .common)
+        timer.resume()
         cursorPinTimer = timer
     }
     private func resetCursor() {
-        cursorPinTimer?.invalidate()
+        cursorPinTimer?.cancel()
         cursorPinTimer = nil
         pinnedCursor = nil
         guard isOverridingCursor else { return }
@@ -284,6 +289,9 @@ class MouseTracker {
         // No throttling here: the math below is trivial and AXWindowWriter
         // self-paces (latest-wins), so every event improves temporal resolution.
         flushPendingMouseUpdate()
+        // Re-assert last: the app under the pointer sets its own cursor while
+        // handling this same mouse-moved event, and whoever writes last wins.
+        pinnedCursor?.set()
     }
     private func drainQueuedExternalMouseUpdate() {
         guard let update = takeQueuedExternalMouseUpdate() else { return }
