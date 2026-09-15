@@ -32,7 +32,7 @@ class MouseTracker {
     func startTracking(for action: MouseAction, button: MouseButton) {
         if currentAction != .none { stopTracking(for: currentAction) }
         prepareTracking(for: action, mouseLocation: NSEvent.mouseLocation, coordinateSpace: .appKit)
-        if trackedWindow != nil { registerMouseEventMonitor(button: button); startTrackingTimer(); isTracking = true; applyCursor() }
+        if trackedWindow != nil { registerMouseEventMonitor(button: button); startTrackingTimer(); isTracking = true }
     }
     @discardableResult
     func startTrackingForExternalMouseUpdates(for action: MouseAction, initialMouseLocation: NSPoint) -> Bool {
@@ -43,7 +43,6 @@ class MouseTracker {
         }
         isTracking = true
         startTrackingTimer()
-        applyCursor()
         return true
     }
     func stopTracking(for action: MouseAction) {
@@ -54,38 +53,6 @@ class MouseTracker {
         AXWindowWriter.shared.endGesture()
         restoreEnhancedUIForTrackedApp()
         invalidateTrackingTimer(); removeMouseEventMonitor(); resetTrackingVariables(); clearQueuedExternalMouseUpdate(); isTracking = false
-        resetCursor()
-    }
-    /// Cursor shown while a move/resize gesture is armed or in progress, since the
-    /// tracked window belongs to another app and won't show one on its own.
-    /// `.set()` forces the system cursor immediately; re-asserting it on every
-    /// tracked mouse-moved event (see `updateTracking`) is what keeps it showing
-    /// over the target app's own cursor rects, which would otherwise reclaim it
-    /// as the pointer moves.
-    private func applyCursor() {
-        guard isTracking else { return }
-        cursor(for: currentAction).set()
-    }
-    private func resetCursor() {
-        NSCursor.arrow.set()
-    }
-    private func cursor(for action: MouseAction) -> NSCursor {
-        switch action {
-        case .move: return .closedHand
-        case .resize: return resizeCursor()
-        case .none: return .arrow
-        }
-    }
-    /// AppKit has no public diagonal resize cursor, so corner quadrants — and the
-    /// no-quadrants default, which always resizes diagonally from the bottom-right —
-    /// fall back to a crosshair.
-    private func resizeCursor() -> NSCursor {
-        guard shouldUseQuadrants, let quadrant else { return .crosshair }
-        switch quadrant {
-        case .top, .bottom: return .resizeUpDown
-        case .left, .right: return .resizeLeftRight
-        case .topLeft, .topRight, .bottomLeft, .bottomRight, .center: return .crosshair
-        }
     }
     private static let enhancedUIAttribute = "AXEnhancedUserInterface" as CFString
     /// Disables `AXEnhancedUserInterface` on the tracked window's app for the duration of a
@@ -131,7 +98,6 @@ class MouseTracker {
         if currentAction == .resize, shouldUseQuadrants, let m = initialMouseLocation, let w = initialWindowLocation, let s = windowSize {
             quadrant = determineQuadrant(mouseLocation: windowBoundsMouseLocation(m), windowSize: s, windowLocation: w)
         }
-        applyCursor()
     }
     private func prepareTracking(for action: MouseAction, mouseLocation: NSPoint, coordinateSpace: MouseLocationCoordinateSpace) {
         // A double-tap maximize/restore glide shares AXWindowWriter with this
@@ -233,7 +199,6 @@ class MouseTracker {
         guard isTracking, let _ = initialMouseLocation, let _ = initialWindowLocation, let _ = trackedWindow else {
             return
         }
-        applyCursor()
         if allowsKeyInterruption && checkForKeyPresses() {
             pauseTracking()
             return
