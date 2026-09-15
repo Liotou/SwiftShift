@@ -19,6 +19,8 @@ class MouseTracker {
     private var queuedExternalMouseUpdateScheduled = false
     private var enhancedUIApp: AXUIElement?
     private var enhancedUIPrev: Bool?
+    private lazy var cursorOverlay = CursorOverlayWindow()
+    private var isSystemCursorHidden = false
     private init() { registerForSpaceChangeNotifications() }
     deinit { unregisterForSpaceChangeNotifications() }
     private func registerForSpaceChangeNotifications() {
@@ -58,16 +60,23 @@ class MouseTracker {
     }
     /// Cursor shown while a move/resize gesture is armed or in progress, since the
     /// tracked window belongs to another app and won't show one on its own.
-    /// `.set()` forces the system cursor immediately; re-asserting it on every
-    /// tracked mouse-moved event (see `updateTracking`) is what keeps it showing
-    /// over the target app's own cursor rects, which would otherwise reclaim it
-    /// as the pointer moves.
+    /// `NSCursor.set()` is only honored for the frontmost app — SwiftShift never
+    /// becomes frontmost during a gesture (that would steal keyboard focus from
+    /// the window being dragged), so the system won't display a cursor we set
+    /// directly. Instead we hide the real cursor and draw our own image in a
+    /// tiny always-on-top, click-through window that follows the pointer; any
+    /// app, frontmost or not, can show a window. Repositioned on every tracked
+    /// mouse-moved event (see `updateTracking`) to track the pointer.
     private func applyCursor() {
         guard isTracking else { return }
-        cursor(for: currentAction).set()
+        if !isSystemCursorHidden { NSCursor.hide(); isSystemCursorHidden = true }
+        cursorOverlay.show(cursor(for: currentAction), at: NSEvent.mouseLocation)
     }
     private func resetCursor() {
-        NSCursor.arrow.set()
+        guard isSystemCursorHidden else { return }
+        cursorOverlay.hide()
+        NSCursor.unhide()
+        isSystemCursorHidden = false
     }
     private func cursor(for action: MouseAction) -> NSCursor {
         switch action {
@@ -377,5 +386,49 @@ class MouseTracker {
             return event.location
         }
         return NSEvent.mouseLocation
+    }
+}
+
+/// A borderless, click-through window that shows an `NSCursor`'s bitmap at a
+/// given screen point, standing in for the real system cursor while it's
+/// hidden. Any app can show a window regardless of activation state, unlike
+/// `NSCursor.set()`, which only the frontmost app can make visible.
+private final class CursorOverlayWindow {
+    private let window: NSWindow
+    private let imageView: NSImageView
+
+    init() {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1, height: 1), styleMask: .borderless, backing: .buffered, defer: false)
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.hasShadow = false
+        window.ignoresMouseEvents = true
+        window.level = .screenSaver
+        window.isExcludedFromWindowsMenu = true
+        window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary, .transient]
+
+        let imageView = NSImageView(frame: NSRect(x: 0, y: 0, width: 1, height: 1))
+        imageView.autoresizingMask = [.width, .height]
+        imageView.imageScaling = .scaleProportionallyUpOrDown
+        window.contentView = imageView
+
+        self.window = window
+        self.imageView = imageView
+    }
+
+    /// Moves the overlay so `cursor`'s hot spot sits exactly at `screenPoint`
+    /// (both in AppKit screen coordinates: origin bottom-left, y up) and shows it.
+    func show(_ cursor: NSCursor, at screenPoint: NSPoint) {
+        let image = cursor.image
+        if imageView.image !== image {
+            imageView.image = image
+        }
+        let origin = NSPoint(x: screenPoint.x - cursor.hotSpot.x, y: screenPoint.y - cursor.hotSpot.y)
+        window.setFrame(NSRect(origin: origin, size: image.size), display: window.isVisible)
+        if !window.isVisible { window.orderFrontRegardless() }
+    }
+
+    func hide() {
+        window.orderOut(nil)
     }
 }
