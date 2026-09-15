@@ -19,8 +19,8 @@ class MouseTracker {
     private var queuedExternalMouseUpdateScheduled = false
     private var enhancedUIApp: AXUIElement?
     private var enhancedUIPrev: Bool?
-    private lazy var cursorOverlay = CursorOverlayWindow()
-    private var isSystemCursorHidden = false
+    private var cursorBeforeGesture: NSCursor?
+    private var isOverridingCursor = false
     private init() { registerForSpaceChangeNotifications() }
     deinit { unregisterForSpaceChangeNotifications() }
     private func registerForSpaceChangeNotifications() {
@@ -59,28 +59,31 @@ class MouseTracker {
         resetCursor()
     }
     /// Cursor shown while a move/resize gesture is armed or in progress, since the
-    /// tracked window belongs to another app and won't show one on its own.
-    /// `NSCursor.set()` is only honored for the frontmost app — SwiftShift never
-    /// becomes frontmost during a gesture (that would steal keyboard focus from
-    /// the window being dragged) — so instead we hide the real cursor and draw
-    /// our own image in a tiny always-on-top, click-through window that follows
-    /// the pointer; any app, frontmost or not, can show a window. Hiding uses
-    /// `CGDisplayHideCursor`, not `NSCursor.hide()`: the latter is an AppKit
-    /// convenience that (like `.set()`) only reliably hides the cursor for the
-    /// frontmost app, which left both the real and overlay cursors visible at
-    /// once. `CGDisplayHideCursor` operates at the Window Server / display level
-    /// and works regardless of which app is active. Repositioned on every
-    /// tracked mouse-moved event (see `updateTracking`) to track the pointer.
+    /// tracked window belongs to another app and won't show one for a gesture it
+    /// knows nothing about. Needs `BackgroundCursor.enable()` first: the Window
+    /// Server ignores `NSCursor.set()` from an app that isn't frontmost, and
+    /// SwiftShift never becomes frontmost during a gesture (that would steal
+    /// keyboard focus from the window being dragged).
+    ///
+    /// Re-applied on every tracked mouse-moved event (see `updateTracking`),
+    /// because the app under the pointer re-asserts its own cursor rects as the
+    /// mouse moves across it; last writer wins, so we simply keep writing.
     private func applyCursor() {
         guard isTracking else { return }
-        if !isSystemCursorHidden { CGDisplayHideCursor(CGMainDisplayID()); isSystemCursorHidden = true }
-        cursorOverlay.show(cursor(for: currentAction), at: NSEvent.mouseLocation)
+        BackgroundCursor.enable()
+        if !isOverridingCursor {
+            // Remember what the app under the pointer was showing, to hand the
+            // cursor back on mouse-up instead of forcing a possibly-wrong arrow.
+            cursorBeforeGesture = NSCursor.currentSystem
+            isOverridingCursor = true
+        }
+        cursor(for: currentAction).set()
     }
     private func resetCursor() {
-        guard isSystemCursorHidden else { return }
-        cursorOverlay.hide()
-        CGDisplayShowCursor(CGMainDisplayID())
-        isSystemCursorHidden = false
+        guard isOverridingCursor else { return }
+        isOverridingCursor = false
+        (cursorBeforeGesture ?? .arrow).set()
+        cursorBeforeGesture = nil
     }
     private func cursor(for action: MouseAction) -> NSCursor {
         switch action {
@@ -393,46 +396,37 @@ class MouseTracker {
     }
 }
 
-/// A borderless, click-through window that shows an `NSCursor`'s bitmap at a
-/// given screen point, standing in for the real system cursor while it's
-/// hidden. Any app can show a window regardless of activation state, unlike
-/// `NSCursor.set()`, which only the frontmost app can make visible.
-private final class CursorOverlayWindow {
-    private let window: NSWindow
-    private let imageView: NSImageView
+/// Lets this app set the mouse cursor while it isn't the frontmost one.
+///
+/// The Window Server normally ignores `NSCursor.set()` (and `NSCursor.hide()` /
+/// `CGDisplayHideCursor`) from a background app — measured on macOS 26: setting
+/// `.closedHand` from an inactive process left `NSCursor.currentSystem` on
+/// whatever the frontmost app wanted. Tagging our Window Server connection with
+/// the undocumented `SetsCursorInBackground` property lifts that restriction,
+/// and `currentSystem` then reports the cursor we asked for. This is the
+/// long-standing way background utilities drive the cursor; the alternative,
+/// activating the app mid-gesture, would pull keyboard focus out of the very
+/// window being dragged.
+///
+/// `CGSMainConnectionID` / `CGSSetConnectionProperty` are undocumented, so they
+/// are resolved with `dlsym` rather than linked: on a macOS that drops them the
+/// cursor simply stops changing instead of the app failing to launch.
+private enum BackgroundCursor {
+    private static var didAttemptEnable = false
 
-    init() {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1, height: 1), styleMask: .borderless, backing: .buffered, defer: false)
-        window.isOpaque = false
-        window.backgroundColor = .clear
-        window.hasShadow = false
-        window.ignoresMouseEvents = true
-        window.level = .screenSaver
-        window.isExcludedFromWindowsMenu = true
-        window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary, .transient]
+    static func enable() {
+        guard !didAttemptEnable else { return }
+        didAttemptEnable = true
 
-        let imageView = NSImageView(frame: NSRect(x: 0, y: 0, width: 1, height: 1))
-        imageView.autoresizingMask = [.width, .height]
-        imageView.imageScaling = .scaleProportionallyUpOrDown
-        window.contentView = imageView
+        typealias MainConnectionID = @convention(c) () -> UInt32
+        typealias SetConnectionProperty = @convention(c) (UInt32, UInt32, CFString, CFTypeRef) -> Int32
 
-        self.window = window
-        self.imageView = imageView
-    }
+        guard let handle = dlopen(nil, RTLD_LAZY),
+              let connectionSymbol = dlsym(handle, "CGSMainConnectionID"),
+              let propertySymbol = dlsym(handle, "CGSSetConnectionProperty") else { return }
 
-    /// Moves the overlay so `cursor`'s hot spot sits exactly at `screenPoint`
-    /// (both in AppKit screen coordinates: origin bottom-left, y up) and shows it.
-    func show(_ cursor: NSCursor, at screenPoint: NSPoint) {
-        let image = cursor.image
-        if imageView.image !== image {
-            imageView.image = image
-        }
-        let origin = NSPoint(x: screenPoint.x - cursor.hotSpot.x, y: screenPoint.y - cursor.hotSpot.y)
-        window.setFrame(NSRect(origin: origin, size: image.size), display: window.isVisible)
-        if !window.isVisible { window.orderFrontRegardless() }
-    }
-
-    func hide() {
-        window.orderOut(nil)
+        let connectionID = unsafeBitCast(connectionSymbol, to: MainConnectionID.self)()
+        let setProperty = unsafeBitCast(propertySymbol, to: SetConnectionProperty.self)
+        _ = setProperty(connectionID, connectionID, "SetsCursorInBackground" as CFString, kCFBooleanTrue)
     }
 }
