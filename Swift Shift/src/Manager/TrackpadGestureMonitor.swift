@@ -11,6 +11,31 @@ struct TrackpadTouch {
   let position: CGPoint
 }
 
+// MARK: - Debug log
+
+/// Development aid: appends what the trackpad monitor sees and decides to
+/// `~/Library/Logs/SwiftShift/trackpad.log`. Off unless switched on with
+/// `defaults write com.pablopunk.Swift-Shift trackpadDebugLog -bool true`; when off, each call
+/// costs one branch and builds no string.
+enum TrackpadDebugLog {
+  static var enabled = false
+
+  private static var handle: FileHandle? = {
+    let directory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/SwiftShift")
+    try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let url = directory.appendingPathComponent("trackpad.log")
+    // A fresh log per launch, so a session's log holds only that session.
+    FileManager.default.createFile(atPath: url.path, contents: nil)
+    return try? FileHandle(forWritingTo: url)
+  }()
+
+  static func write(_ message: @autoclosure () -> String) {
+    guard enabled, let handle else { return }
+    let line = String(format: "%9.3f  ", ProcessInfo.processInfo.systemUptime) + message() + "\n"
+    handle.write(Data(line.utf8))
+  }
+}
+
 // MARK: - Three-finger swipe down
 
 /// Recognizes three fingers travelling down the trackpad. Ported from the standalone Stash app
@@ -229,6 +254,9 @@ final class TrackpadGestureMonitor: ObservableObject {
   @Published private(set) var fingerCount = 0
   @Published private(set) var swipeProgress: Double = 0
   @Published private(set) var holdIndicator: HoldIndicator = .idle
+  /// False while a gesture is enabled but Accessibility hasn't been granted, so nothing can
+  /// listen to the trackpad. Lets the Trackpad tab say so instead of silently doing nothing.
+  @Published private(set) var hasAccessibility = true
 
   /// Set while the Trackpad tab is visible.
   var isObserving = false
@@ -254,6 +282,11 @@ final class TrackpadGestureMonitor: ObservableObject {
   private let hold = TwoFingerHoldRecognizer()
   private var deviceSize = CGSize.zero
   private var holdTimerRestStart: TimeInterval?
+  private var lastPreferencesSnapshot = ""
+  private var lastLoggedTouchCount = -1
+  private var lastLoggedPhase: TwoFingerHoldRecognizer.Phase = .idle
+  private var lastLoggedAt: TimeInterval = 0
+  private var droppedScrollEvents = 0
 
   private var isGrabbing = false
   private var grabOrigin = CGPoint.zero
@@ -282,6 +315,7 @@ final class TrackpadGestureMonitor: ObservableObject {
   /// Re-reads the preferences and starts or stops listening accordingly. Cheap and idempotent:
   /// it runs on every change to the user defaults.
   func applyPreferences() {
+    TrackpadDebugLog.enabled = UserDefaults.standard.bool(forKey: "trackpadDebugLog")
     swipeEnabled = PreferencesManager.loadBool(for: .swipeDownMinimize, defaultValue: true)
     holdEnabled = PreferencesManager.loadBool(for: .twoFingerHoldMove)
     swipeLength = PreferencesManager.loadDouble(for: .swipeLength, defaultValue: 0.12)
@@ -289,6 +323,12 @@ final class TrackpadGestureMonitor: ObservableObject {
     showDesktopOnFullScreen = PreferencesManager.loadBool(for: .swipeShowsDesktopOnFullScreen, defaultValue: true)
     holdDuration = PreferencesManager.loadDouble(for: .twoFingerHoldDuration, defaultValue: 0.45)
     holdSpeed = PreferencesManager.loadDouble(for: .twoFingerHoldSpeed, defaultValue: 1.2)
+
+    let snapshot = "prefs swipe=\(swipeEnabled) hold=\(holdEnabled) holdDuration=\(holdDuration) speed=\(holdSpeed) running=\(isRunning)"
+    if snapshot != lastPreferencesSnapshot {
+      lastPreferencesSnapshot = snapshot
+      TrackpadDebugLog.write(snapshot)
+    }
 
     if !swipeEnabled { swipe.reset() }
     if !holdEnabled { apply(hold.reset()) }
@@ -346,7 +386,12 @@ final class TrackpadGestureMonitor: ObservableObject {
 
   @discardableResult
   private func installTap() -> Bool {
-    guard PermissionsManager.hasAccessibilityPermission() else { return false }
+    guard PermissionsManager.hasAccessibilityPermission() else {
+      if hasAccessibility { hasAccessibility = false }
+      TrackpadDebugLog.write("tap: Accessibility not granted, will retry")
+      return false
+    }
+    if !hasAccessibility { hasAccessibility = true }
 
     let pointer = Unmanaged.passUnretained(self).toOpaque()
     guard let tap = CGEvent.tapCreate(
@@ -363,7 +408,10 @@ final class TrackpadGestureMonitor: ObservableObject {
         return Unmanaged.passUnretained(event)
       },
       userInfo: pointer
-    ) else { return false }
+    ) else {
+      TrackpadDebugLog.write("tap: CGEvent.tapCreate failed")
+      return false
+    }
 
     let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
     CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
@@ -372,6 +420,7 @@ final class TrackpadGestureMonitor: ObservableObject {
     self.tap = tap
     self.source = source
     isRunning = true
+    TrackpadDebugLog.write("tap: installed")
     return true
   }
 
@@ -383,7 +432,10 @@ final class TrackpadGestureMonitor: ObservableObject {
       return
     }
 
-    guard let nsEvent = NSEvent(cgEvent: event) else { return }
+    guard let nsEvent = NSEvent(cgEvent: event) else {
+      TrackpadDebugLog.write("event type=\(type.rawValue): NSEvent(cgEvent:) returned nil")
+      return
+    }
     let raw = nsEvent.touches(matching: .touching, in: nil)
     if let size = raw.first?.deviceSize, size.width > 0 { deviceSize = size }
 
@@ -391,7 +443,23 @@ final class TrackpadGestureMonitor: ObservableObject {
       guard let id = touch.identity as? NSObject else { return nil }
       return TrackpadTouch(id: id, position: touch.normalizedPosition)
     }
+    logTouches(type: type, touches: touches, rawCount: raw.count)
     process(touches: touches, at: now)
+  }
+
+  /// One line per change of finger count or hold phase, and otherwise at most every 100 ms.
+  private func logTouches(type: CGEventType, touches: [TrackpadTouch], rawCount: Int) {
+    guard TrackpadDebugLog.enabled else { return }
+    let time = now
+    let changed = touches.count != lastLoggedTouchCount || hold.phase != lastLoggedPhase || type.rawValue != 29
+    guard changed || time - lastLoggedAt > 0.1 else { return }
+    lastLoggedTouchCount = touches.count
+    lastLoggedPhase = hold.phase
+    lastLoggedAt = time
+    let fingers = touches
+      .map { String(format: "%04x:(%.3f,%.3f)", $0.id.hash & 0xffff, $0.position.x, $0.position.y) }
+      .joined(separator: " ")
+    TrackpadDebugLog.write("event type=\(type.rawValue) touches=\(touches.count)/\(rawCount) phase=\(hold.phase) \(fingers)")
   }
 
   private func process(touches: [TrackpadTouch], at time: TimeInterval) {
@@ -428,6 +496,7 @@ final class TrackpadGestureMonitor: ObservableObject {
 
     DispatchQueue.main.asyncAfter(deadline: .now() + holdDuration + 0.01) { [weak self] in
       guard let self, self.holdEnabled, self.hold.phase == .resting, self.hold.restStart == restStart else { return }
+      TrackpadDebugLog.write("hold timer fired, phase=\(self.hold.phase)")
       self.apply(self.hold.tick(now: self.now, holdDuration: self.holdDuration))
       self.publishHoldIndicator()
     }
@@ -437,6 +506,7 @@ final class TrackpadGestureMonitor: ObservableObject {
 
   private func apply(_ events: [TwoFingerHoldRecognizer.Event]) {
     for event in events {
+      if case .moved = event {} else { TrackpadDebugLog.write("hold event: \(event)") }
       switch event {
       case .began: beginGrab()
       case .moved(let dx, let dy): moveGrab(dx: dx, dy: dy)
@@ -447,14 +517,24 @@ final class TrackpadGestureMonitor: ObservableObject {
 
   private func beginGrab() {
     // Not while a keyboard-driven move/resize is armed: the two would fight over the window.
-    guard !ShortcutsManager.shared.hasActiveShortcut,
-          let origin = CGEvent(source: nil)?.location,
-          MouseTracker.shared.startTrackingForExternalMouseUpdates(for: .move, initialMouseLocation: origin)
-    else {
+    if ShortcutsManager.shared.hasActiveShortcut {
+      TrackpadDebugLog.write("grab refused: a keyboard shortcut is armed")
+      hold.reject()
+      return
+    }
+    guard let origin = CGEvent(source: nil)?.location else {
+      TrackpadDebugLog.write("grab refused: no cursor location")
+      hold.reject()
+      return
+    }
+    guard MouseTracker.shared.startTrackingForExternalMouseUpdates(for: .move, initialMouseLocation: origin) else {
+      TrackpadDebugLog.write("grab refused: no movable window under the cursor at \(origin)")
       hold.reject()
       return
     }
 
+    TrackpadDebugLog.write("grab started at \(origin)")
+    droppedScrollEvents = 0
     isGrabbing = true
     grabOrigin = origin
     referenceWidth = Self.screenWidth(atQuartzPoint: origin)
@@ -473,12 +553,17 @@ final class TrackpadGestureMonitor: ObservableObject {
     // The trackpad's y points up; Quartz's points down.
     let location = CGPoint(x: grabOrigin.x + dx * gain, y: grabOrigin.y - dy * gain * aspect)
     MouseTracker.shared.queueExternalMouseUpdate(withMouseLocation: location, timestamp: now)
+    if TrackpadDebugLog.enabled, now - lastLoggedAt > 0.1 {
+      lastLoggedAt = now
+      TrackpadDebugLog.write(String(format: "move d=(%.3f,%.3f) virtual=(%.0f,%.0f)", dx, dy, location.x, location.y))
+    }
   }
 
   private func endGrab() {
     guard isGrabbing else { return }
     isGrabbing = false
     MouseTracker.shared.stopTracking(for: .move)
+    TrackpadDebugLog.write("grab ended, \(droppedScrollEvents) scroll events swallowed so far")
     endScrollSuppression()
   }
 
@@ -525,6 +610,7 @@ final class TrackpadGestureMonitor: ObservableObject {
     let time = now
     if isGrabbing || time < dropAllScrollUntil {
       event.cancel()
+      droppedScrollEvents += 1
       return
     }
     guard time < dropMomentumScrollUntil else { return }

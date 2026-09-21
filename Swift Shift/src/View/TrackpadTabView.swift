@@ -52,6 +52,10 @@ struct TrackpadTabView: View {
           .foregroundStyle(.tertiary)
       }
 
+      if !monitor.hasAccessibility {
+        PermissionRequestView()
+      }
+
       PreferenceToggle(
         isOn: $swipeDownMinimize,
         title: "Swipe down with three fingers",
