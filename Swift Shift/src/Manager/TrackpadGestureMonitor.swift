@@ -1,5 +1,4 @@
 import AppKit
-import CGEventSupervisor
 
 // MARK: - Touches
 
@@ -106,154 +105,20 @@ final class ThreeFingerSwipeRecognizer {
   }
 }
 
-// MARK: - Two-finger hold, then drag
-
-/// Recognizes two fingers that rest on the trackpad for a moment and are then dragged.
-///
-/// Two fingers moving straight away is an ordinary scroll, so the hold is what tells the two
-/// apart: if the fingers travel before the hold has elapsed the whole touch is written off as a
-/// scroll (or pinch) and can never turn into a grab, however long they linger afterwards. Only
-/// touches that begin still can become one.
-final class TwoFingerHoldRecognizer {
-
-  enum Phase: Equatable {
-    case idle
-    /// Two fingers down and still, counting towards the hold time.
-    case resting
-    case grabbing
-    /// Moved too early (a scroll), or the grab could not start: ignored until the fingers lift.
-    case rejected
-  }
-
-  enum Event: Equatable {
-    case began
-    /// Movement of the fingers' midpoint since the grab began, as a fraction of the trackpad
-    /// (y points up, like the trackpad's own coordinates).
-    case moved(dx: CGFloat, dy: CGFloat)
-    case ended
-  }
-
-  /// How far the fingers may wander during the hold — hand tremor, not intent — as a fraction
-  /// of the trackpad.
-  static let restTolerance: CGFloat = 0.02
-
-  private(set) var phase: Phase = .idle
-  private(set) var restStart: TimeInterval = 0
-
-  private var restPositions: [NSObject: CGPoint] = [:]
-  private var midpoint: CGPoint = .zero
-  private var anchor: CGPoint = .zero
-
-  func update(touches: [TrackpadTouch], now: TimeInterval, holdDuration: TimeInterval) -> [Event] {
-    guard touches.count == 2 else { return reset() }
-
-    let previousMidpoint = midpoint
-    midpoint = Self.midpoint(of: touches)
-    var events: [Event] = []
-
-    switch phase {
-    case .idle:
-      beginRest(touches, now: now)
-
-    case .resting:
-      if Set(touches.map(\.id)) != Set(restPositions.keys) {
-        // A finger was swapped for another: the hold starts over.
-        beginRest(touches, now: now)
-      } else if now - restStart >= holdDuration {
-        // Still for the whole hold, and this is the first event after it — the first movement.
-        // Grab from where the fingers were resting, so nothing jumps.
-        anchor = previousMidpoint
-        phase = .grabbing
-        events.append(.began)
-        events.append(moved())
-      } else if hasDrifted(touches) {
-        phase = .rejected
-      }
-
-    case .grabbing:
-      events.append(moved())
-
-    case .rejected:
-      break
-    }
-    return events
-  }
-
-  /// Notices a hold that ends with the fingers perfectly still, when no touch event arrives to
-  /// say so. Call it once the hold time has passed.
-  func tick(now: TimeInterval, holdDuration: TimeInterval) -> [Event] {
-    guard phase == .resting, now - restStart >= holdDuration else { return [] }
-    anchor = midpoint
-    phase = .grabbing
-    return [.began]
-  }
-
-  /// The grab couldn't start (no window under the cursor…): ignore this touch until it lifts.
-  func reject() {
-    phase = .rejected
-  }
-
-  @discardableResult
-  func reset() -> [Event] {
-    let wasGrabbing = phase == .grabbing
-    phase = .idle
-    restPositions.removeAll()
-    return wasGrabbing ? [.ended] : []
-  }
-
-  private func beginRest(_ touches: [TrackpadTouch], now: TimeInterval) {
-    phase = .resting
-    restStart = now
-    restPositions.removeAll()
-    for touch in touches { restPositions[touch.id] = touch.position }
-  }
-
-  private func hasDrifted(_ touches: [TrackpadTouch]) -> Bool {
-    touches.contains { touch in
-      guard let origin = restPositions[touch.id] else { return true }
-      return hypot(touch.position.x - origin.x, touch.position.y - origin.y) > Self.restTolerance
-    }
-  }
-
-  private func moved() -> Event {
-    .moved(dx: midpoint.x - anchor.x, dy: midpoint.y - anchor.y)
-  }
-
-  private static func midpoint(of touches: [TrackpadTouch]) -> CGPoint {
-    let count = CGFloat(touches.count)
-    return CGPoint(
-      x: touches.reduce(0) { $0 + $1.position.x } / count,
-      y: touches.reduce(0) { $0 + $1.position.y } / count
-    )
-  }
-}
-
 // MARK: - Monitor
 
 /// Listens to the trackpad and runs the gestures on it.
 ///
 /// A listen-only `CGEventTap` on the gesture events macOS emits whenever fingers touch the
-/// trackpad gives access to the raw `NSTouch` data. Two gestures are built on it:
-///
-/// - **Swipe down with three fingers** drops the window under the cursor into the Dock
-///   (see `WindowMinimizer`).
-/// - **Hold two fingers, then drag** moves the window under the cursor. It rides on
-///   `MouseTracker`'s external-update path — the one the left+right click chord uses — so it gets
-///   snapping, focus-on-window, the gesture cursor and the background AX writer for free.
+/// trackpad gives access to the raw `NSTouch` data. **Swipe down with three fingers** drops the
+/// window under the cursor into the Dock (see `WindowMinimizer`).
 final class TrackpadGestureMonitor: ObservableObject {
 
   static let shared = TrackpadGestureMonitor()
 
-  enum HoldIndicator: Equatable {
-    case idle
-    case holding
-    case grabbed
-  }
-
   // Published for the settings indicator, and only while `isObserving`.
   @Published private(set) var fingerCount = 0
   @Published private(set) var swipeProgress: Double = 0
-  @Published private(set) var holdIndicator: HoldIndicator = .idle
   /// False while a gesture is enabled but Accessibility hasn't been granted, so nothing can
   /// listen to the trackpad. Lets the Trackpad tab say so instead of silently doing nothing.
   @Published private(set) var hasAccessibility = true
@@ -266,12 +131,9 @@ final class TrackpadGestureMonitor: ObservableObject {
   // MARK: Configuration (cached from the preferences)
 
   private var swipeEnabled = false
-  private var holdEnabled = false
   private var swipeLength = 0.12
   private var actOnBackgroundWindows = true
   private var showDesktopOnFullScreen = true
-  private var holdDuration = 0.45
-  private var holdSpeed = 1.2
 
   // MARK: State
 
@@ -279,23 +141,10 @@ final class TrackpadGestureMonitor: ObservableObject {
   private var source: CFRunLoopSource?
   private var retryTimer: Timer?
   private let swipe = ThreeFingerSwipeRecognizer()
-  private let hold = TwoFingerHoldRecognizer()
-  private var deviceSize = CGSize.zero
-  private var holdTimerRestStart: TimeInterval?
+
   private var lastPreferencesSnapshot = ""
   private var lastLoggedTouchCount = -1
-  private var lastLoggedPhase: TwoFingerHoldRecognizer.Phase = .idle
   private var lastLoggedAt: TimeInterval = 0
-  private var droppedScrollEvents = 0
-
-  private var isGrabbing = false
-  private var grabOrigin = CGPoint.zero
-  private var referenceWidth: CGFloat = 1440
-
-  private static let scrollSubscriber = "trackpadHoldScrollFilter"
-  private var isFilteringScroll = false
-  private var dropAllScrollUntil: TimeInterval = 0
-  private var dropMomentumScrollUntil: TimeInterval = 0
 
   /// NSEvent types 19 = beginGesture, 20 = endGesture, 29 = gesture.
   private static let eventMask: CGEventMask = (1 << 19) | (1 << 20) | (1 << 29)
@@ -317,25 +166,20 @@ final class TrackpadGestureMonitor: ObservableObject {
   func applyPreferences() {
     TrackpadDebugLog.enabled = UserDefaults.standard.bool(forKey: "trackpadDebugLog")
     swipeEnabled = PreferencesManager.loadBool(for: .swipeDownMinimize, defaultValue: true)
-    holdEnabled = PreferencesManager.loadBool(for: .twoFingerHoldMove)
     swipeLength = PreferencesManager.loadDouble(for: .swipeLength, defaultValue: 0.12)
     actOnBackgroundWindows = PreferencesManager.loadBool(for: .swipeActsOnBackgroundWindows, defaultValue: true)
     showDesktopOnFullScreen = PreferencesManager.loadBool(for: .swipeShowsDesktopOnFullScreen, defaultValue: true)
-    holdDuration = PreferencesManager.loadDouble(for: .twoFingerHoldDuration, defaultValue: 0.45)
-    holdSpeed = PreferencesManager.loadDouble(for: .twoFingerHoldSpeed, defaultValue: 1.2)
 
-    let snapshot = "prefs swipe=\(swipeEnabled) hold=\(holdEnabled) holdDuration=\(holdDuration) speed=\(holdSpeed) running=\(isRunning)"
+    let snapshot = "prefs swipe=\(swipeEnabled) length=\(swipeLength) running=\(isRunning)"
     if snapshot != lastPreferencesSnapshot {
       lastPreferencesSnapshot = snapshot
       TrackpadDebugLog.write(snapshot)
     }
 
-    if !swipeEnabled { swipe.reset() }
-    if !holdEnabled { apply(hold.reset()) }
-
-    if swipeEnabled || holdEnabled {
+    if swipeEnabled {
       start()
     } else {
+      swipe.reset()
       stop()
     }
   }
@@ -350,7 +194,6 @@ final class TrackpadGestureMonitor: ObservableObject {
   func stop() {
     retryTimer?.invalidate()
     retryTimer = nil
-    apply(hold.reset())
     swipe.reset()
     guard isRunning, let tap, let source else { return }
     CGEvent.tapEnable(tap: tap, enable: false)
@@ -372,7 +215,7 @@ final class TrackpadGestureMonitor: ObservableObject {
     guard retryTimer == nil else { return }
     retryTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] timer in
       guard let self else { timer.invalidate(); return }
-      guard self.swipeEnabled || self.holdEnabled else {
+      guard self.swipeEnabled else {
         timer.invalidate()
         self.retryTimer = nil
         return
@@ -436,47 +279,35 @@ final class TrackpadGestureMonitor: ObservableObject {
       TrackpadDebugLog.write("event type=\(type.rawValue): NSEvent(cgEvent:) returned nil")
       return
     }
-    let raw = nsEvent.touches(matching: .touching, in: nil)
-    if let size = raw.first?.deviceSize, size.width > 0 { deviceSize = size }
-
-    let touches = raw.compactMap { touch -> TrackpadTouch? in
+    let touches = nsEvent.touches(matching: .touching, in: nil).compactMap { touch -> TrackpadTouch? in
       guard let id = touch.identity as? NSObject else { return nil }
       return TrackpadTouch(id: id, position: touch.normalizedPosition)
     }
-    logTouches(type: type, touches: touches, rawCount: raw.count)
-    process(touches: touches, at: now)
+    logTouches(type: type, touches: touches)
+
+    var progress = 0.0
+    if swipeEnabled {
+      let update = swipe.update(touches: touches, now: now, threshold: swipeLength)
+      progress = update.progress
+      if update.triggered {
+        TrackpadDebugLog.write("swipe triggered")
+        fireSwipe()
+      }
+    }
+    publish(fingers: touches.count, progress: progress)
   }
 
-  /// One line per change of finger count or hold phase, and otherwise at most every 100 ms.
-  private func logTouches(type: CGEventType, touches: [TrackpadTouch], rawCount: Int) {
+  /// One line per change of finger count, and otherwise at most every 100 ms.
+  private func logTouches(type: CGEventType, touches: [TrackpadTouch]) {
     guard TrackpadDebugLog.enabled else { return }
     let time = now
-    let changed = touches.count != lastLoggedTouchCount || hold.phase != lastLoggedPhase || type.rawValue != 29
-    guard changed || time - lastLoggedAt > 0.1 else { return }
+    guard touches.count != lastLoggedTouchCount || type.rawValue != 29 || time - lastLoggedAt > 0.1 else { return }
     lastLoggedTouchCount = touches.count
-    lastLoggedPhase = hold.phase
     lastLoggedAt = time
     let fingers = touches
       .map { String(format: "%04x:(%.3f,%.3f)", $0.id.hash & 0xffff, $0.position.x, $0.position.y) }
       .joined(separator: " ")
-    TrackpadDebugLog.write("event type=\(type.rawValue) touches=\(touches.count)/\(rawCount) phase=\(hold.phase) \(fingers)")
-  }
-
-  private func process(touches: [TrackpadTouch], at time: TimeInterval) {
-    var progress = 0.0
-
-    if swipeEnabled {
-      let update = swipe.update(touches: touches, now: time, threshold: swipeLength)
-      progress = update.progress
-      if update.triggered { fireSwipe() }
-    }
-
-    if holdEnabled {
-      apply(hold.update(touches: touches, now: time, holdDuration: holdDuration))
-      scheduleHoldTimerIfNeeded()
-    }
-
-    publish(fingers: touches.count, progress: progress)
+    TrackpadDebugLog.write("event type=\(type.rawValue) touches=\(touches.count) \(fingers)")
   }
 
   private func fireSwipe() {
@@ -485,139 +316,6 @@ final class TrackpadGestureMonitor: ObservableObject {
     DispatchQueue.main.async {
       WindowMinimizer.minimizeWindowUnderCursor(actOnBackgroundWindows: background, showDesktopOnFullScreen: desktop)
     }
-  }
-
-  /// A hold that ends with the fingers perfectly still produces no touch events, so nothing
-  /// would notice the hold time running out. A timer does.
-  private func scheduleHoldTimerIfNeeded() {
-    guard hold.phase == .resting, holdTimerRestStart != hold.restStart else { return }
-    let restStart = hold.restStart
-    holdTimerRestStart = restStart
-
-    DispatchQueue.main.asyncAfter(deadline: .now() + holdDuration + 0.01) { [weak self] in
-      guard let self, self.holdEnabled, self.hold.phase == .resting, self.hold.restStart == restStart else { return }
-      TrackpadDebugLog.write("hold timer fired, phase=\(self.hold.phase)")
-      self.apply(self.hold.tick(now: self.now, holdDuration: self.holdDuration))
-      self.publishHoldIndicator()
-    }
-  }
-
-  // MARK: - Grabbing a window
-
-  private func apply(_ events: [TwoFingerHoldRecognizer.Event]) {
-    for event in events {
-      if case .moved = event {} else { TrackpadDebugLog.write("hold event: \(event)") }
-      switch event {
-      case .began: beginGrab()
-      case .moved(let dx, let dy): moveGrab(dx: dx, dy: dy)
-      case .ended: endGrab()
-      }
-    }
-  }
-
-  private func beginGrab() {
-    // Not while a keyboard-driven move/resize is armed: the two would fight over the window.
-    if ShortcutsManager.shared.hasActiveShortcut {
-      TrackpadDebugLog.write("grab refused: a keyboard shortcut is armed")
-      hold.reject()
-      return
-    }
-    guard let origin = CGEvent(source: nil)?.location else {
-      TrackpadDebugLog.write("grab refused: no cursor location")
-      hold.reject()
-      return
-    }
-    guard MouseTracker.shared.startTrackingForExternalMouseUpdates(for: .move, initialMouseLocation: origin) else {
-      TrackpadDebugLog.write("grab refused: no movable window under the cursor at \(origin)")
-      hold.reject()
-      return
-    }
-
-    TrackpadDebugLog.write("grab started at \(origin)")
-    droppedScrollEvents = 0
-    isGrabbing = true
-    grabOrigin = origin
-    referenceWidth = Self.screenWidth(atQuartzPoint: origin)
-    beginScrollSuppression()
-    // A click under the fingers, so the grab is felt before the fingers start to move.
-    NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .now)
-  }
-
-  /// The fingers' movement drives a virtual cursor, which `MouseTracker` turns into window
-  /// movement exactly as it does for a real one. Distances are scaled by the trackpad's real
-  /// aspect ratio so a diagonal swipe on the trackpad is a diagonal move on screen.
-  private func moveGrab(dx: CGFloat, dy: CGFloat) {
-    guard isGrabbing else { return }
-    let aspect = deviceSize.width > 0 ? deviceSize.height / deviceSize.width : 0.625
-    let gain = referenceWidth * CGFloat(holdSpeed)
-    // The trackpad's y points up; Quartz's points down.
-    let location = CGPoint(x: grabOrigin.x + dx * gain, y: grabOrigin.y - dy * gain * aspect)
-    MouseTracker.shared.queueExternalMouseUpdate(withMouseLocation: location, timestamp: now)
-    if TrackpadDebugLog.enabled, now - lastLoggedAt > 0.1 {
-      lastLoggedAt = now
-      TrackpadDebugLog.write(String(format: "move d=(%.3f,%.3f) virtual=(%.0f,%.0f)", dx, dy, location.x, location.y))
-    }
-  }
-
-  private func endGrab() {
-    guard isGrabbing else { return }
-    isGrabbing = false
-    MouseTracker.shared.stopTracking(for: .move)
-    TrackpadDebugLog.write("grab ended, \(droppedScrollEvents) scroll events swallowed so far")
-    endScrollSuppression()
-  }
-
-  private static func screenWidth(atQuartzPoint point: CGPoint) -> CGFloat {
-    let mainHeight = NSScreen.screens.first?.frame.height ?? 0
-    let cocoa = CGPoint(x: point.x, y: mainHeight - point.y)
-    let screen = NSScreen.screens.first { $0.frame.contains(cocoa) } ?? NSScreen.main
-    return screen?.frame.width ?? 1440
-  }
-
-  // MARK: - Keeping the page from scrolling
-
-  // Two fingers moving on the trackpad also scroll whatever is under the cursor, so while a
-  // window is grabbed the scroll events are swallowed. The filter only exists around a grab —
-  // a permanent active tap on scrolling would put every scroll in every app behind this
-  // process — and outlives it briefly: lifting the fingers starts momentum scrolling, which
-  // would otherwise leak through and scroll the page after the window has been dropped.
-
-  private func beginScrollSuppression() {
-    dropAllScrollUntil = .infinity
-    dropMomentumScrollUntil = .infinity
-    guard !isFilteringScroll else { return }
-    isFilteringScroll = true
-    CGEventSupervisor.shared.subscribe(as: Self.scrollSubscriber, to: .cgEvents(.scrollWheel)) { [weak self] event in
-      self?.filterScroll(event)
-    }
-  }
-
-  private func endScrollSuppression() {
-    dropAllScrollUntil = now + 0.15
-    dropMomentumScrollUntil = now + 1.5
-    DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { [weak self] in
-      self?.releaseScrollFilterIfIdle()
-    }
-  }
-
-  private func releaseScrollFilterIfIdle() {
-    guard isFilteringScroll, !isGrabbing, now >= dropMomentumScrollUntil else { return }
-    isFilteringScroll = false
-    CGEventSupervisor.shared.cancel(subscriber: Self.scrollSubscriber)
-  }
-
-  private func filterScroll(_ event: CGEvent) {
-    let time = now
-    if isGrabbing || time < dropAllScrollUntil {
-      event.cancel()
-      droppedScrollEvents += 1
-      return
-    }
-    guard time < dropMomentumScrollUntil else { return }
-    let momentumPhase = event.getIntegerValueField(.scrollWheelEventMomentumPhase)
-    guard momentumPhase != 0 else { return }
-    event.cancel()
-    if momentumPhase == 3 { dropMomentumScrollUntil = 0 } // momentum ended
   }
 
   // MARK: - Settings indicator
@@ -630,17 +328,5 @@ final class TrackpadGestureMonitor: ObservableObject {
     } else if abs(swipeProgress - progress) > 0.01 {
       swipeProgress = progress
     }
-    publishHoldIndicator()
-  }
-
-  private func publishHoldIndicator() {
-    guard isObserving else { return }
-    let indicator: HoldIndicator
-    switch hold.phase {
-    case .resting: indicator = .holding
-    case .grabbing: indicator = .grabbed
-    case .idle, .rejected: indicator = .idle
-    }
-    if holdIndicator != indicator { holdIndicator = indicator }
   }
 }

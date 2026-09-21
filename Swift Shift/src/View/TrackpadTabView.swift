@@ -39,10 +39,6 @@ struct TrackpadTabView: View {
   @AppStorage(PreferenceKey.swipeActsOnBackgroundWindows.rawValue) private var actOnBackgroundWindows = true
   @AppStorage(PreferenceKey.swipeShowsDesktopOnFullScreen.rawValue) private var showDesktopOnFullScreen = true
 
-  @AppStorage(PreferenceKey.twoFingerHoldMove.rawValue) private var holdToMove = false
-  @AppStorage(PreferenceKey.twoFingerHoldDuration.rawValue) private var holdDuration = 0.45
-  @AppStorage(PreferenceKey.twoFingerHoldSpeed.rawValue) private var holdSpeed = 1.2
-
   var body: some View {
     VStack(alignment: .leading, spacing: 10) {
       VStack(alignment: .leading, spacing: 4) {
@@ -95,40 +91,6 @@ struct TrackpadTabView: View {
 
       Divider().opacity(0.5)
 
-      PreferenceToggle(
-        isOn: $holdToMove,
-        title: "Hold two fingers, then drag",
-        subtitle: "Move the window without a keyboard shortcut",
-        icon: "hand.point.up.left"
-      )
-
-      if holdToMove {
-        VStack(alignment: .leading, spacing: 8) {
-          PreferenceSlider(
-            value: $holdDuration,
-            range: 0.25...1.0,
-            title: "Hold time",
-            valueLabel: String(format: "%.2f s", holdDuration),
-            lowLabel: "Quick",
-            highLabel: "Deliberate"
-          )
-
-          PreferenceSlider(
-            value: $holdSpeed,
-            range: 0.5...3.0,
-            title: "Speed",
-            valueLabel: String(format: "%.1f×", holdSpeed),
-            lowLabel: "Slow",
-            highLabel: "Fast"
-          )
-
-          holdIndicator
-        }
-        .padding(.leading, 26)
-      }
-
-      Divider().opacity(0.5)
-
       Text("If macOS also triggers App Exposé, set that gesture to four fingers in System Settings › Trackpad › More Gestures.")
         .font(.system(size: 10))
         .foregroundStyle(.tertiary)
@@ -147,33 +109,6 @@ struct TrackpadTabView: View {
         .foregroundStyle(monitor.fingerCount == 3 ? .primary : .secondary)
         .frame(width: 64, alignment: .leading)
       ProgressView(value: monitor.swipeProgress)
-    }
-  }
-
-  private var holdIndicator: some View {
-    HStack(spacing: 6) {
-      Circle()
-        .fill(holdIndicatorColor)
-        .frame(width: 7, height: 7)
-      Text(holdIndicatorText)
-        .font(.system(size: 11))
-        .foregroundStyle(monitor.holdIndicator == .idle ? .secondary : .primary)
-    }
-  }
-
-  private var holdIndicatorText: String {
-    switch monitor.holdIndicator {
-    case .idle: return "Rest two fingers on the trackpad"
-    case .holding: return "Holding…"
-    case .grabbed: return "Grabbed — drag to move"
-    }
-  }
-
-  private var holdIndicatorColor: Color {
-    switch monitor.holdIndicator {
-    case .idle: return .secondary.opacity(0.4)
-    case .holding: return .orange
-    case .grabbed: return .green
     }
   }
 }

@@ -29,7 +29,6 @@ There are several ways:
 * Smart resizing with quadrants
 * Double-tap a modifier key to maximize/restore (Resize key) or minimize (Move key) the window under the cursor — the two are swappable
 * Swipe down with three fingers to drop the window under the cursor into the Dock — or show the desktop when it's full screen (merged from [Stash](https://github.com/Liotou/Stash))
-* Hold two fingers on the trackpad, then drag, to move the window under the cursor
 * Ignore custom apps
 
 ### Quadrants
