@@ -4,12 +4,14 @@ import Sparkle
 
 enum Tab: String, CaseIterable {
   case settings = "Settings"
+  case trackpad = "Trackpad"
   case ignoredApps = "Ignored Apps"
   case info = "About"
 
   var icon: String {
     switch self {
     case .settings: return "gear"
+    case .trackpad: return "hand.draw"
     case .ignoredApps: return "macwindow.on.rectangle"
     case .info: return "info.circle"
     }
@@ -65,6 +67,8 @@ struct AppView: View {
         switch selectedTab {
         case .settings:
           SettingsView()
+        case .trackpad:
+          TrackpadTabView()
         case .ignoredApps:
           IgnoredAppsTabView()
         case .info:

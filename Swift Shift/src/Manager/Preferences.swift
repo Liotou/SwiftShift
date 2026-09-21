@@ -9,6 +9,13 @@ enum PreferenceKey: String {
     case moveWithBothMouseButtons = "moveWithBothMouseButtons"
     case doubleTapModifierActions = "doubleTapModifierActions"
     case doubleTapActionsSwapped = "doubleTapActionsSwapped"
+    case swipeDownMinimize = "swipeDownMinimize"
+    case swipeLength = "swipeLength"
+    case swipeActsOnBackgroundWindows = "swipeActsOnBackgroundWindows"
+    case swipeShowsDesktopOnFullScreen = "swipeShowsDesktopOnFullScreen"
+    case twoFingerHoldMove = "twoFingerHoldMove"
+    case twoFingerHoldDuration = "twoFingerHoldDuration"
+    case twoFingerHoldSpeed = "twoFingerHoldSpeed"
     case fnShortcutWarningDismissed = "fnShortcutWarningDismissed"
     case ignoredApps = "ignoredApps"
     case didMigrateDefaultIgnoredApps = "didMigrateDefaultIgnoredApps"
@@ -19,6 +26,10 @@ class PreferencesManager {
     
     static func loadBool(for key: PreferenceKey, defaultValue: Bool = false) -> Bool {
         return UserDefaults.standard.object(forKey: key.rawValue) as? Bool ?? defaultValue
+    }
+
+    static func loadDouble(for key: PreferenceKey, defaultValue: Double) -> Double {
+        return UserDefaults.standard.object(forKey: key.rawValue) as? Double ?? defaultValue
     }
     
     static func invalidateIgnoredAppsCache() {

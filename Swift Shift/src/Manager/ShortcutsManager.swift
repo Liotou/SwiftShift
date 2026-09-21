@@ -274,6 +274,7 @@ class ShortcutsManager {
     updateGlobalShortcuts()
     MouseChordActionManager.shared.forceRebuild()
     DoubleTapActionManager.shared.forceRebuild()
+    TrackpadGestureMonitor.shared.forceRebuild()
   }
 
   private func handleSpaceChange() {

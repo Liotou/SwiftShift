@@ -93,7 +93,7 @@ class WindowManager {
         }
         return nil
     }
-    private static func getWindow(from element: AXUIElement) -> AXUIElement? {
+    static func getWindow(from element: AXUIElement) -> AXUIElement? {
         var r: AnyObject?; AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &r)
         if r as? String == kAXWindowRole { return element }
         var p: AnyObject?; AXUIElementCopyAttributeValue(element, kAXParentAttribute as CFString, &p)
