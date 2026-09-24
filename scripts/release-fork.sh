@@ -32,9 +32,13 @@ cd "$ROOT"
 publish=false
 [[ "${1:-}" == "--publish" ]] && publish=true
 
-if $publish && [[ "$(git branch --show-current)" != "main" ]]; then
-  echo "Error: --publish must be run from 'main' (GitHub Pages serves $APPCAST from there)." >&2
-  exit 1
+# The remote that points at the fork. Pushing to it by name, never a bare `git push`: a local
+# `main` created from a clone of upstream tracks upstream, and would push there.
+remote="$(git remote -v | awk -v repo="$REPO" '/\(push\)/ && index($0, repo) { print $1; exit }')"
+
+if $publish; then
+  [[ "$(git branch --show-current)" == "main" ]] || { echo "Error: --publish must be run from 'main' (GitHub Pages serves $APPCAST from there)." >&2; exit 1; }
+  [[ -n "$remote" ]] || { echo "Error: no git remote points at $REPO." >&2; exit 1; }
 fi
 
 # --- Sparkle's command-line tools ---------------------------------------------------------------
@@ -139,7 +143,7 @@ if $publish; then
     --notes "$APP_NAME $short_version. Not notarized: on first install, right-click › Open, or run \`xattr -dr com.apple.quarantine \"/Applications/$APP_NAME.app\"\`."
   git add "$APPCAST"
   git commit -m "Release $short_version"
-  git push
+  git push "$remote" HEAD
   echo "✓ Published. Installed copies will see it through the feed once GitHub Pages redeploys (a minute or two)."
 else
   echo
