@@ -9,7 +9,7 @@ OUT_DIR="${1:-$REPO_ROOT/www/src/images}"
 DEBUG_DIR="${SWIFTSHIFT_SCREENSHOT_DEBUG_DIR:-$REPO_ROOT/.agents/skills/screenshots/debug}"
 
 APP_NAME="Swift Shift Dev"
-BUNDLE_ID="com.pablopunk.Swift-Shift.dev"
+BUNDLE_ID="fr.equiriconi.swiftshift.dev"
 # Desired top-left for the actual SwiftShift window content in the 843×670 final.
 # Window-only captures may include transparent shadow margins; the script accounts for that.
 TARGET_X="${SWIFTSHIFT_SCREENSHOT_X:-255}"

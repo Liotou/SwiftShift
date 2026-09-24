@@ -14,7 +14,7 @@ struct TrackpadTouch {
 
 /// Development aid: appends what the trackpad monitor sees and decides to
 /// `~/Library/Logs/SwiftShift/trackpad.log`. Off unless switched on with
-/// `defaults write com.pablopunk.Swift-Shift trackpadDebugLog -bool true`; when off, each call
+/// `defaults write fr.equiriconi.swiftshift trackpadDebugLog -bool true`; when off, each call
 /// costs one branch and builds no string.
 enum TrackpadDebugLog {
   static var enabled = false

@@ -553,7 +553,7 @@
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1.4.1;
+				CURRENT_PROJECT_VERSION = 1.5.0;
 				DEVELOPMENT_ASSET_PATHS = "\"Swift Shift/Preview Content\"";
 				DEVELOPMENT_TEAM = 2TZ4Q825M7;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -570,8 +570,8 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
-				MARKETING_VERSION = 1.4.1;
-				PRODUCT_BUNDLE_IDENTIFIER = "com.pablopunk.Swift-Shift.dev";
+				MARKETING_VERSION = 1.5.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "fr.equiriconi.swiftshift.dev";
 				PRODUCT_NAME = "$(TARGET_NAME) Dev";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
@@ -588,14 +588,14 @@
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1.4.1;
+				CURRENT_PROJECT_VERSION = 1.5.0;
 				DEVELOPMENT_ASSET_PATHS = "\"Swift Shift/Preview Content\"";
 				DEVELOPMENT_TEAM = 2TZ4Q825M7;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Swift-Shift-Info.plist";
-				INFOPLIST_KEY_CFBundleDisplayName = "Swift Shift";
+				INFOPLIST_KEY_CFBundleDisplayName = "Swift Shift Plus";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
@@ -604,9 +604,9 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
-				MARKETING_VERSION = 1.4.1;
-				PRODUCT_BUNDLE_IDENTIFIER = "com.pablopunk.Swift-Shift";
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				MARKETING_VERSION = 1.5.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "fr.equiriconi.swiftshift";
+				PRODUCT_NAME = "Swift Shift Plus";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
 			};

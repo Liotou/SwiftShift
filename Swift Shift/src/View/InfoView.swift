@@ -27,7 +27,7 @@ struct InfoView: View {
 
         VStack(alignment: .leading, spacing: 2) {
           HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Text("Swift Shift")
+            Text("Swift Shift Plus")
               .font(.system(size: 16, weight: .semibold))
             if let version {
               Text("v\(version)")
@@ -36,7 +36,7 @@ struct InfoView: View {
             }
           }
           HStack(spacing: 4) {
-            Text("Made with 🩵 by")
+            Text("A fork of Swift Shift by")
               .font(.system(size: 11))
               .foregroundStyle(.secondary)
             Link("Pablo Varela", destination: URL(string: "https://pablopunk.com")!)
@@ -50,7 +50,7 @@ struct InfoView: View {
 
       // Actions row
       HStack(spacing: 8) {
-        Link(destination: URL(string: "https://github.com/pablopunk/SwiftShift")!) {
+        Link(destination: URL(string: "https://github.com/Liotou/SwiftShift")!) {
           HStack(spacing: 5) {
             Image(systemName: "swift")
               .font(.system(size: 11))

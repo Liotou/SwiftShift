@@ -9,6 +9,28 @@
 https://github.com/pablopunk/SwiftShift/assets/4324982/8f0566b9-d18e-462e-8d74-52bcf6c95f52
 
 
+## About this fork
+
+**Swift Shift Plus** is a fork of Swift Shift by [Pablo Varela](https://pablopunk.com), with a few extras:
+double-tapping a modifier key to maximize or minimize a window (with macOS's tiled-window margin, a
+glide animation, and swappable keys), a cursor that shows whether you are moving or resizing, and a
+three-finger swipe down on the trackpad that drops a window into the Dock (merged from
+[Stash](https://github.com/Liotou/Stash)).
+
+It has its own identity — bundle identifier `fr.equiriconi.swiftshift` — so it installs next to the
+original without sharing its settings, and its own update channel: `SUFeedURL` and `SUPublicEDKey` in
+`Swift-Shift-Info.plist` point at `appcast-plus.xml`, signed with a key that belongs to this fork.
+Everything else stays upstream's; `git fetch upstream` brings in his releases.
+
+Releases are made with `scripts/release-fork.sh` (see the comments at its top for the one-time setup).
+They are not notarized, so on first install use right-click › Open, or:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/Swift Shift Plus.app"
+```
+
+The rest of this README is upstream's.
+
 ## Installation
 
 There are several ways:
