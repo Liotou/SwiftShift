@@ -36,6 +36,7 @@ struct PreferencesView: View {
   @AppStorage(PreferenceKey.focusOnApp.rawValue) private var focusOnApp = true
   @AppStorage(PreferenceKey.useQuadrants.rawValue) private var useQuadrants = false
   @AppStorage(PreferenceKey.snapToWindows.rawValue) private var snapToWindows = true
+  @AppStorage(PreferenceKey.nativeDrag.rawValue) private var nativeDrag = true
   @AppStorage(PreferenceKey.doubleTapModifierActions.rawValue) private var doubleTapModifierActions = false
   @AppStorage(PreferenceKey.doubleTapActionsSwapped.rawValue) private var doubleTapActionsSwapped = false
 
@@ -75,6 +76,13 @@ struct PreferencesView: View {
         title: "Use quadrants",
         subtitle: "Resize from nearest edge/corner",
         icon: "rectangle.split.2x2"
+      )
+
+      PreferenceToggle(
+        isOn: $nativeDrag,
+        title: "Native window drag",
+        subtitle: "Keyboard move, as if by the title bar",
+        icon: "hand.draw"
       )
 
       PreferenceToggle(

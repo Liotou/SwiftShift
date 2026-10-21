@@ -232,6 +232,70 @@ class WindowManager {
         return self.axRect(fromAppKit: chosen.visibleFrame)
     }
 
+    /// A point of the window's title bar that can be pressed to drag the window without pressing
+    /// anything else, or nil. Looks a few points below the top edge, away from the centre first
+    /// (where a document title and its proxy icon sit), and accepts only what is known to be safe:
+    /// the window's own background, an empty stretch of toolbar, or as a last resort the title text,
+    /// all belonging to this very window (another window, or Stage Manager's backdrop, may be in
+    /// front of it). A tab, a button, a field or a title bar drawn by web content is never pressed.
+    static func titleBarGrabPoint(of window: AXUIElement) -> CGPoint? {
+        guard let frame = getFrame(window: window), frame.width > 120, frame.height > 40 else { return nil }
+        let system = AXUIElementCreateSystemWide()
+        let fractions: [CGFloat] = [0.75, 0.25, 0.85, 0.15, 0.62, 0.38]
+        var titlePoint: CGPoint?
+        for fraction in fractions {
+            let point = CGPoint(x: (frame.minX + frame.width * fraction).rounded(), y: frame.minY + 6)
+            var element: AXUIElement?
+            guard AXUIElementCopyElementAtPosition(system, Float(point.x), Float(point.y), &element) == .success,
+                  let element else { continue }
+            if CFEqual(element, window) { return point }
+            let role = attributeString(element, kAXRoleAttribute)
+            guard role == kAXToolbarRole || role == kAXStaticTextRole,
+                  let owner = getWindow(from: element), CFEqual(owner, window) else { continue }
+            if role == kAXToolbarRole { return point }
+            if titlePoint == nil, let parent = parent(of: element), CFEqual(parent, window) { titlePoint = point }
+        }
+        return titlePoint
+    }
+
+    private static func attributeString(_ element: AXUIElement, _ attribute: String) -> String? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success else { return nil }
+        return value as? String
+    }
+
+    private static func parent(of element: AXUIElement) -> AXUIElement? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXParentAttribute as CFString, &value) == .success,
+              let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+        return (value as! AXUIElement)
+    }
+
+    /// The WindowServer window matching an AX window (same owner, same frame), with that frame.
+    static func windowServerWindow(matching window: AXUIElement) -> (number: CGWindowID, frame: CGRect)? {
+        guard let frame = getFrame(window: window) else { return nil }
+        var pid: pid_t = 0
+        AXUIElementGetPid(window, &pid)
+        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: AnyObject]] ?? []
+        for info in list where (info[kCGWindowOwnerPID as String] as? pid_t) == pid && (info[kCGWindowLayer as String] as? Int ?? 0) == 0 {
+            guard let bounds = info[kCGWindowBounds as String] as? [String: CGFloat],
+                  let rect = CGRect(dictionaryRepresentation: bounds as CFDictionary),
+                  let number = info[kCGWindowNumber as String] as? CGWindowID else { continue }
+            if abs(rect.minX - frame.minX) < 2, abs(rect.minY - frame.minY) < 2,
+               abs(rect.width - frame.width) < 2, abs(rect.height - frame.height) < 2 {
+                return (number, rect)
+            }
+        }
+        return nil
+    }
+
+    /// A window's frame as the WindowServer has it right now. Unlike AX, it is live during a drag.
+    static func windowServerFrame(of number: CGWindowID) -> CGRect? {
+        let list = CGWindowListCopyWindowInfo([.optionIncludingWindow], number) as? [[String: AnyObject]] ?? []
+        guard let bounds = list.first?[kCGWindowBounds as String] as? [String: CGFloat] else { return nil }
+        return CGRect(dictionaryRepresentation: bounds as CFDictionary)
+    }
+
     /// The focused window of the frontmost app, used as a fallback when the cursor
     /// is not over a window. Skips our own app and ignored apps.
     static func getFocusedWindow() -> AXUIElement? {
