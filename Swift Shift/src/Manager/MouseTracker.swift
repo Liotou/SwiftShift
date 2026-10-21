@@ -25,7 +25,7 @@ class MouseTracker {
     private var pinnedCursor: NSCursor?
     private var cursorPinTimer: DispatchSourceTimer?
     private var titleBarDrag: TitleBarDrag?
-    private lazy var cursorStandIn = CursorStandInWindow()
+    private lazy var cursorStandIn = CursorStandIn()
     private init() { registerForSpaceChangeNotifications() }
     deinit { unregisterForSpaceChangeNotifications() }
     private func registerForSpaceChangeNotifications() {
@@ -584,6 +584,7 @@ extension MouseTracker {
             cursorStandIn.show(cursor(for: .move), atQuartz: location)
             postSyntheticMouse(.leftMouseDown, at: drag.grabPoint, flags: heldModifiers)
             TrackpadDebugLog.write("titlebar: pressed at \(drag.grabPoint), held at \(location)")
+            Self.trace("press", drag)
             return
         }
         var delta = CGPoint(x: event.getDoubleValueField(.mouseEventDeltaX), y: event.getDoubleValueField(.mouseEventDeltaY))
@@ -598,6 +599,21 @@ extension MouseTracker {
         postSyntheticMouse(.leftMouseDragged, at: drag.titleBarPoint, flags: heldModifiers)
         cursorStandIn.show(cursor(for: .move), atQuartz: drag.pointer)
         checkTheWindowFollows(pointer: drag.pointer)
+    }
+
+    private static let traceQueue = DispatchQueue(label: "titleBarDrag.trace")
+
+    /// Debug log of a drag: the user's pointer, the pressed one, and the window where the
+    /// WindowServer has it, read off the main thread.
+    private static func trace(_ label: String, _ drag: TitleBarDrag, after delay: TimeInterval = 0) {
+        guard TrackpadDebugLog.enabled, let number = drag.windowNumber else { return }
+        let user = drag.pointer, pressed = drag.titleBarPoint
+        traceQueue.asyncAfter(deadline: .now() + delay) {
+            let f = WindowManager.windowServerFrame(of: number) ?? .null
+            let line = String(format: "titlebar: %@ user=(%.0f, %.0f) pressed=(%.0f, %.0f) window=(%.0f, %.0f, %.0f x %.0f)",
+                              label, user.x, user.y, pressed.x, pressed.y, f.minX, f.minY, f.width, f.height)
+            DispatchQueue.main.async { TrackpadDebugLog.write(line) }
+        }
     }
 
     /// `point`, kept on the displays the way the system keeps the pointer there: a move that would
@@ -677,6 +693,8 @@ extension MouseTracker {
         // after the move.
         postSyntheticMouse(.mouseMoved, at: drag.pointer, flags: flags)
         TrackpadDebugLog.write("titlebar: released after \(drag.moves) moves, followed=\(drag.followConfirmed)")
+        Self.trace("release", drag)
+        Self.trace("settled", drag, after: 0.5)
         // The move lands within a millisecond; the image comes back once it has, so the pointer
         // never shows on the title bar. The hardware pointer answers meanwhile.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.008) { [weak self] in
@@ -689,40 +707,80 @@ extension MouseTracker {
     }
 }
 
-/// A click-through window that draws a cursor image at a given point, standing in for the real
-/// cursor while it is invisible.
-private final class CursorStandInWindow {
-    private let window: NSWindow
-    private let imageView: NSImageView
-
-    init() {
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1, height: 1), styleMask: .borderless, backing: .buffered, defer: false)
-        window.isOpaque = false
-        window.backgroundColor = .clear
-        window.hasShadow = false
-        window.ignoresMouseEvents = true
-        window.level = .screenSaver
-        window.isExcludedFromWindowsMenu = true
-        window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary, .transient]
-        imageView = NSImageView(frame: NSRect(x: 0, y: 0, width: 1, height: 1))
-        imageView.autoresizingMask = [.width, .height]
-        imageView.imageScaling = .scaleNone
-        window.contentView = imageView
+/// Draws a cursor image where the user's pointer is, standing in for the real pointer while it is
+/// invisible. One click-through overlay per display is put up when the drag starts and stays put;
+/// only a layer inside it moves. Moving a window at every event, as this used to, now and then held
+/// the WindowServer's event stream for half a second in mid-drag (measured, when other processes
+/// were reading the window list meanwhile), and the window then landed off target.
+private final class CursorStandIn {
+    private struct Overlay {
+        /// The display's frame in Quartz coordinates.
+        let frame: CGRect
+        let window: NSWindow
+        let layer: CALayer
     }
+    private var overlays: [Overlay] = []
+    private var isShown = false
 
     /// Places the image so the cursor's hot spot sits on `point` (Quartz coordinates).
     func show(_ cursor: NSCursor, atQuartz point: CGPoint) {
-        let image = cursor.image
-        if imageView.image !== image { imageView.image = image }
-        let mainHeight = NSScreen.screens.first?.frame.height ?? 0
-        // The hot spot is measured from the image's top-left corner; window frames from bottom-left.
-        let origin = NSPoint(x: point.x - cursor.hotSpot.x,
-                             y: (mainHeight - point.y) - (image.size.height - cursor.hotSpot.y))
-        window.setFrame(NSRect(origin: origin, size: image.size), display: window.isVisible)
-        if !window.isVisible { window.orderFrontRegardless() }
+        if !isShown {
+            if overlays.map(\.frame) != Self.displayFrames() { build() }
+            overlays.forEach { $0.window.orderFrontRegardless() }
+            isShown = true
+        }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for overlay in overlays {
+            guard overlay.frame.contains(point) else { overlay.layer.isHidden = true; continue }
+            let image = cursor.image, scale = overlay.window.backingScaleFactor
+            overlay.layer.contents = image.layerContents(forContentsScale: scale)
+            overlay.layer.contentsScale = scale
+            // The hot spot is measured from the image's top-left corner; the layer from the
+            // overlay's bottom-left one.
+            overlay.layer.frame = CGRect(x: point.x - overlay.frame.minX - cursor.hotSpot.x,
+                                         y: overlay.frame.maxY - point.y - (image.size.height - cursor.hotSpot.y),
+                                         width: image.size.width, height: image.size.height)
+            overlay.layer.isHidden = false
+        }
+        CATransaction.commit()
     }
 
     func hide() {
-        window.orderOut(nil)
+        guard isShown else { return }
+        isShown = false
+        overlays.forEach { $0.window.orderOut(nil) }
+    }
+
+    private func build() {
+        overlays.forEach { $0.window.orderOut(nil) }
+        overlays = NSScreen.screens.compactMap { screen in
+            guard let frame = Self.quartzFrame(of: screen) else { return nil }
+            let window = NSWindow(contentRect: screen.frame, styleMask: .borderless, backing: .buffered, defer: false)
+            window.isOpaque = false
+            window.backgroundColor = .clear
+            window.hasShadow = false
+            window.ignoresMouseEvents = true
+            window.level = .screenSaver
+            window.isExcludedFromWindowsMenu = true
+            window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary, .transient]
+            window.setFrame(screen.frame, display: false)
+            let view = NSView(frame: NSRect(origin: .zero, size: screen.frame.size))
+            view.wantsLayer = true
+            let layer = CALayer()
+            layer.isHidden = true
+            view.layer?.addSublayer(layer)
+            window.contentView = view
+            return Overlay(frame: frame, window: window, layer: layer)
+        }
+    }
+
+    private static func quartzFrame(of screen: NSScreen) -> CGRect? {
+        guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return nil }
+        return CGDisplayBounds(CGDirectDisplayID(number.uint32Value))
+    }
+
+    private static func displayFrames() -> [CGRect] {
+        NSScreen.screens.compactMap(quartzFrame(of:))
     }
 }
