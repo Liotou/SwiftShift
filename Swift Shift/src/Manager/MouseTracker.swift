@@ -498,7 +498,10 @@ private enum BackgroundCursor {
 ///   title bar, not a Control-click.
 /// - The hardware keeps sending plain moves, which say no button is down and are not taken as drags
 ///   even when rewritten (measured with a real mouse: the window never moved). Each one is dropped
-///   and replaced by a real drag at the same spot.
+///   and replaced by a real drag, placed from the move's delta and not its position: a move already
+///   on its way when the press was posted is counted from where the user's pointer was, not from
+///   the title bar, and following it made the window, or the pointer, jump by the distance between
+///   the two.
 /// - The pressed pointer sits on the title bar, so it is made invisible: hiding the cursor is refused
 ///   to a background app, but changing its image is allowed. A stand-in hand is drawn where the user
 ///   took hold of the window and travels with it, and at the end the real pointer is put back under
@@ -508,6 +511,8 @@ private struct TitleBarDrag {
     let grabPoint: CGPoint
     /// Where the user's pointer was when the drag started, inside the window.
     var heldPoint: CGPoint
+    /// Where the user's pointer is now, as the moves' deltas carry it.
+    var pointer: CGPoint
     var isPressed = false
     /// The window in the WindowServer and its frame there when the move began, to notice a press
     /// that did not start a drag. Nil when it could not be identified.
@@ -518,9 +523,9 @@ private struct TitleBarDrag {
     /// The first drag after the press, and when it came: the follow check measures from there.
     var firstDrag: (location: CGPoint, time: TimeInterval)?
 
-    /// Where the user holds the window, for a pointer at `pointer`. Both travel together.
-    func held(forPointerAt pointer: CGPoint) -> CGPoint {
-        CGPoint(x: pointer.x + heldPoint.x - grabPoint.x, y: pointer.y + heldPoint.y - grabPoint.y)
+    /// Where the pressed pointer is on the title bar: it travels with the user's.
+    var titleBarPoint: CGPoint {
+        CGPoint(x: grabPoint.x + pointer.x - heldPoint.x, y: grabPoint.y + pointer.y - heldPoint.y)
     }
 }
 
@@ -548,7 +553,7 @@ extension MouseTracker {
               let grab = WindowManager.titleBarGrabPoint(of: window),
               let held = CGEvent(source: nil)?.location else { return false }
         let server = WindowManager.windowServerWindow(matching: window)
-        titleBarDrag = TitleBarDrag(grabPoint: grab, heldPoint: held, windowNumber: server?.number, startFrame: server?.frame)
+        titleBarDrag = TitleBarDrag(grabPoint: grab, heldPoint: held, pointer: held, windowNumber: server?.number, startFrame: server?.frame)
         CGEventSupervisor.shared.subscribe(as: Self.titleBarDragSubscriber,
                                            to: .cgEvents(.mouseMoved, .leftMouseDown, .leftMouseDragged, .leftMouseUp)) { [weak self] event in
             self?.handleTitleBarDragEvent(event)
@@ -571,6 +576,7 @@ extension MouseTracker {
         if !drag.isPressed {
             drag.isPressed = true
             drag.heldPoint = location
+            drag.pointer = location
             titleBarDrag = drag
             BackgroundCursor.enable()
             pinnedCursor = Self.invisibleCursor
@@ -580,9 +586,29 @@ extension MouseTracker {
             TrackpadDebugLog.write("titlebar: pressed at \(drag.grabPoint), held at \(location)")
             return
         }
-        postSyntheticMouse(.leftMouseDragged, at: location, flags: heldModifiers)
-        cursorStandIn.show(cursor(for: .move), atQuartz: drag.held(forPointerAt: location))
-        checkTheWindowFollows(pointer: location)
+        var delta = CGPoint(x: event.getDoubleValueField(.mouseEventDeltaX), y: event.getDoubleValueField(.mouseEventDeltaY))
+        if delta == .zero {
+            // A move posted by software may carry no delta; it is then counted from where the
+            // pointer is, pressed on the title bar.
+            let pressed = drag.titleBarPoint
+            delta = CGPoint(x: location.x - pressed.x, y: location.y - pressed.y)
+        }
+        drag.pointer = Self.keptOnScreen(CGPoint(x: drag.pointer.x + delta.x, y: drag.pointer.y + delta.y), from: drag.pointer)
+        titleBarDrag = drag
+        postSyntheticMouse(.leftMouseDragged, at: drag.titleBarPoint, flags: heldModifiers)
+        cursorStandIn.show(cursor(for: .move), atQuartz: drag.pointer)
+        checkTheWindowFollows(pointer: drag.pointer)
+    }
+
+    /// `point`, kept on the displays the way the system keeps the pointer there: a move that would
+    /// leave them stops at the edge of the display the pointer was on.
+    private static func keptOnScreen(_ point: CGPoint, from previous: CGPoint) -> CGPoint {
+        var display: CGDirectDisplayID = 0, count: UInt32 = 0
+        if CGGetDisplaysWithPoint(point, 1, &display, &count) == .success, count > 0 { return point }
+        guard CGGetDisplaysWithPoint(previous, 1, &display, &count) == .success, count > 0 else { return point }
+        let bounds = CGDisplayBounds(display)
+        return CGPoint(x: min(max(point.x, bounds.minX), bounds.maxX - 1),
+                       y: min(max(point.y, bounds.minY), bounds.maxY - 1))
     }
 
     private func postSyntheticMouse(_ type: CGEventType, at point: CGPoint, flags: CGEventFlags) {
@@ -643,14 +669,13 @@ extension MouseTracker {
             continuation?()
             return false
         }
-        let pointer = CGEvent(source: nil)?.location ?? drag.grabPoint
         let flags = CGEventSource.flagsState(.hidSystemState)
-        postSyntheticMouse(.leftMouseUp, at: pointer, flags: flags)
+        postSyntheticMouse(.leftMouseUp, at: drag.titleBarPoint, flags: flags)
         // The pointer goes back as a move in the same event stream, so the WindowServer ends the
         // drag before it sees the move and the window stays put. Not `CGWarpMouseCursorPosition`:
         // a warp freezes the hardware pointer for about 250 ms, felt as the mouse not answering
         // after the move.
-        postSyntheticMouse(.mouseMoved, at: drag.held(forPointerAt: pointer), flags: flags)
+        postSyntheticMouse(.mouseMoved, at: drag.pointer, flags: flags)
         TrackpadDebugLog.write("titlebar: released after \(drag.moves) moves, followed=\(drag.followConfirmed)")
         // The move lands within a millisecond; the image comes back once it has, so the pointer
         // never shows on the title bar. The hardware pointer answers meanwhile.
