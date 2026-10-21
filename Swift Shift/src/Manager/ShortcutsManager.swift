@@ -485,6 +485,7 @@ class ShortcutsManager {
       let isActive = self.activeShortcuts[shortcutType] ?? false
       let keysDown = self.checkForAdditionalKeysDown()
 
+      TrackpadDebugLog.write("shortcut flagsChanged type=\(shortcutType) flags=\(eventFlags.rawValue) wanted=\(shortcutFlags.rawValue) active=\(isActive) keysDown=\(keysDown)")
       if eventFlags == shortcutFlags && !isActive && !keysDown {
         self.startTracking(userShortcut, mouseAction)
         self.activeShortcuts[shortcutType] = true
@@ -552,6 +553,7 @@ class ShortcutsManager {
 
     switch event.type {
     case .flagsChanged:
+      TrackpadDebugLog.write("shortcut(event monitor) flagsChanged type=\(shortcutType) flags=\(event.modifierFlags.swiftShiftShortcutFlags.rawValue) active=\(isActive)")
       if keyboardShortcut.isModifierOnly {
         let isMatching = event.modifierFlags.swiftShiftShortcutFlags == keyboardShortcut.modifierFlags
         if isMatching && !isActive {
