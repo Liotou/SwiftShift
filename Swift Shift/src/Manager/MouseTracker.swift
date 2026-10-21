@@ -618,7 +618,7 @@ extension MouseTracker {
         DispatchQueue.main.async { [weak self] in
             guard let self, self.titleBarDrag != nil, self.isTracking else { return }
             _ = self.endTitleBarDrag { [weak self] in
-                // Baselined once the pointer is back under the user's hand, or the warp itself would
+                // Baselined once the pointer is back under the user's hand, or its move back would
                 // shift the window.
                 guard let self, self.isTracking, self.currentAction == .move, let window = self.trackedWindow else { return }
                 self.mouseLocationCoordinateSpace = .appKit
@@ -644,17 +644,21 @@ extension MouseTracker {
             return false
         }
         let pointer = CGEvent(source: nil)?.location ?? drag.grabPoint
-        postSyntheticMouse(.leftMouseUp, at: pointer, flags: CGEventSource.flagsState(.hidSystemState))
+        let flags = CGEventSource.flagsState(.hidSystemState)
+        postSyntheticMouse(.leftMouseUp, at: pointer, flags: flags)
+        // The pointer goes back as a move in the same event stream, so the WindowServer ends the
+        // drag before it sees the move and the window stays put. Not `CGWarpMouseCursorPosition`:
+        // a warp freezes the hardware pointer for about 250 ms, felt as the mouse not answering
+        // after the move.
+        postSyntheticMouse(.mouseMoved, at: drag.held(forPointerAt: pointer), flags: flags)
         TrackpadDebugLog.write("titlebar: released after \(drag.moves) moves, followed=\(drag.followConfirmed)")
-        // Warp only once the release has been processed: warping while the drag is live would drag
-        // the window along with the pointer.
-        let back = drag.held(forPointerAt: pointer)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-            CGWarpMouseCursorPosition(back)
-            // Warping suspends the hardware pointer for a moment; give it back right away.
-            CGAssociateMouseAndMouseCursorPosition(1)
-            if let continuation { continuation() } else { self?.resetCursor() }
-            self?.cursorStandIn.hide()
+        // The move lands within a millisecond; the image comes back once it has, so the pointer
+        // never shows on the title bar. The hardware pointer answers meanwhile.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.008) { [weak self] in
+            guard let self else { return }
+            if let continuation { continuation() } else if !self.isTracking { self.resetCursor() }
+            // A new drag may already be under way, with its own stand-in.
+            if self.titleBarDrag?.isPressed != true { self.cursorStandIn.hide() }
         }
         return true
     }
