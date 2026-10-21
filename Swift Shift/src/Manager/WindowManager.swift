@@ -152,6 +152,46 @@ class WindowManager {
         AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, (minimized ? kCFBooleanTrue : kCFBooleanFalse))
     }
 
+    /// A point of the window's title bar that can be pressed to drag the window without pressing
+    /// anything else, or nil. Looks a few points below the top edge, away from the centre first
+    /// (where a document title and its proxy icon sit), and accepts only what is known to be safe:
+    /// the window's own background, an empty stretch of toolbar, or as a last resort the title
+    /// text. A tab strip, a button or a custom title bar is never pressed, since dragging those does
+    /// something else, such as tearing a tab off.
+    static func titleBarGrabPoint(of window: AXUIElement) -> CGPoint? {
+        guard let frame = getFrame(window: window), frame.width > 120, frame.height > 40 else { return nil }
+        let system = AXUIElementCreateSystemWide()
+        let fractions: [CGFloat] = [0.75, 0.25, 0.85, 0.15, 0.62, 0.38]
+        var titlePoint: CGPoint?
+        for fraction in fractions {
+            let point = CGPoint(x: (frame.minX + frame.width * fraction).rounded(), y: frame.minY + 6)
+            var element: AXUIElement?
+            guard AXUIElementCopyElementAtPosition(system, Float(point.x), Float(point.y), &element) == .success,
+                  let element else { continue }
+            if CFEqual(element, window) { return point }
+            let role = attributeString(element, kAXRoleAttribute)
+            // Only parts of this very window: another window may be covering its title bar.
+            guard role == kAXToolbarRole || role == kAXStaticTextRole,
+                  let owner = getWindow(from: element), CFEqual(owner, window) else { continue }
+            if role == kAXToolbarRole { return point }
+            if titlePoint == nil, let parent = parent(of: element), CFEqual(parent, window) { titlePoint = point }
+        }
+        return titlePoint
+    }
+
+    private static func attributeString(_ element: AXUIElement, _ attribute: String) -> String? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success else { return nil }
+        return value as? String
+    }
+
+    private static func parent(of element: AXUIElement) -> AXUIElement? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXParentAttribute as CFString, &value) == .success,
+              let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+        return (value as! AXUIElement)
+    }
+
     /// Whether the AX reference still points at a live, responsive window.
     /// Bounds the messaging timeout so a hung (not terminated) owning app can't
     /// stall this for the full multi-second AX default — callers may probe

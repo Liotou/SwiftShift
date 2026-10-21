@@ -9,6 +9,7 @@ enum PreferenceKey: String {
     case moveWithBothMouseButtons = "moveWithBothMouseButtons"
     case doubleTapModifierActions = "doubleTapModifierActions"
     case doubleTapActionsSwapped = "doubleTapActionsSwapped"
+    case moveByTitleBar = "moveByTitleBar"
     case swipeDownMinimize = "swipeDownMinimize"
     case swipeLength = "swipeLength"
     case swipeActsOnBackgroundWindows = "swipeActsOnBackgroundWindows"

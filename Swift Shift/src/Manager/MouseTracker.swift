@@ -1,5 +1,6 @@
 import Cocoa
 import Accessibility
+import CGEventSupervisor
 enum MouseAction: String { case move, resize, none }
 enum Quadrant { case topLeft, top, topRight, left, center, right, bottomLeft, bottom, bottomRight }
 private enum MouseLocationCoordinateSpace { case appKit, coreGraphics }
@@ -23,6 +24,8 @@ class MouseTracker {
     private var isOverridingCursor = false
     private var pinnedCursor: NSCursor?
     private var cursorPinTimer: DispatchSourceTimer?
+    private var titleBarDrag: TitleBarDrag?
+    private lazy var cursorStandIn = CursorStandInWindow()
     private init() { registerForSpaceChangeNotifications() }
     deinit { unregisterForSpaceChangeNotifications() }
     private func registerForSpaceChangeNotifications() {
@@ -36,7 +39,12 @@ class MouseTracker {
     func startTracking(for action: MouseAction, button: MouseButton) {
         if currentAction != .none { stopTracking(for: currentAction) }
         prepareTracking(for: action, mouseLocation: NSEvent.mouseLocation, coordinateSpace: .appKit)
-        if trackedWindow != nil { registerMouseEventMonitor(button: button); startTrackingTimer(); isTracking = true; applyCursor() }
+        guard trackedWindow != nil else { return }
+        // A keyboard move is performed as a native title-bar drag whenever a safe grab point exists;
+        // otherwise, and for every other gesture, the window follows the pointer through AX writes.
+        let byTitleBar = action == .move && button == .none && beginTitleBarDrag()
+        if !byTitleBar { registerMouseEventMonitor(button: button) }
+        startTrackingTimer(); isTracking = true; applyCursor()
     }
     @discardableResult
     func startTrackingForExternalMouseUpdates(for action: MouseAction, initialMouseLocation: NSPoint) -> Bool {
@@ -52,6 +60,7 @@ class MouseTracker {
     }
     func stopTracking(for action: MouseAction) {
         guard currentAction == action else { return }
+        endTitleBarDrag()
         // Apply the final pending move/resize while Enhanced UI is still disabled (fast path),
         // then restore the attribute, then run the remaining cleanup.
         flushQueuedExternalMouseUpdate(); flushPendingMouseUpdate()
@@ -461,5 +470,140 @@ private enum BackgroundCursor {
         let connectionID = unsafeBitCast(connectionSymbol, to: MainConnectionID.self)()
         let setProperty = unsafeBitCast(propertySymbol, to: SetConnectionProperty.self)
         _ = setProperty(connectionID, connectionID, "SetsCursorInBackground" as CFString, kCFBooleanTrue)
+    }
+}
+
+// MARK: - Moving by the title bar
+
+/// A move carried out as a native drag of the window's title bar.
+///
+/// Writing the window position through Accessibility makes the window lag behind the pointer
+/// whenever the app is slow to answer, and goes wrong when the window changes display: Stage
+/// Manager takes over a window that a program moves onto another display and re-places it itself,
+/// so the window freezes and jumps (measured: pauses of up to 300 ms and jumps of over 1,000 pt
+/// per crossing). A drag by the title bar is run by the WindowServer instead, the same as a drag
+/// with the mouse, and crosses displays smoothly (measured: no jump, pauses under 30 ms).
+///
+/// So the move presses the mouse on a safe point of the title bar, turns the user's plain mouse
+/// movements into drags of it, and releases it when the move ends. The pressed pointer has to sit
+/// on the title bar, but the user should not lose track of it: the real cursor is hidden, a
+/// stand-in is drawn where the user was holding the window and travels with it, and at the end the
+/// real cursor is put back under the stand-in before it reappears.
+private struct TitleBarDrag {
+    /// Where the drag holds the window: a point of its title bar that is safe to press.
+    let grabPoint: CGPoint
+    /// Where the user's pointer was when the move began, inside the window.
+    let heldPoint: CGPoint
+
+    /// From the pressed point to where the user holds the window. Both travel together.
+    func held(forPointerAt pointer: CGPoint) -> CGPoint {
+        CGPoint(x: pointer.x + heldPoint.x - grabPoint.x, y: pointer.y + heldPoint.y - grabPoint.y)
+    }
+}
+
+extension MouseTracker {
+    private static let titleBarDragSubscriber = "titleBarDrag"
+    /// Marks the mouse events SwiftShift posts itself. Same value as MouseChordActionManager's
+    /// replay marker, so that manager lets them through too.
+    private static let syntheticEventMarker: Int64 = 0x5357465453484946
+
+    /// Starts the move as a title-bar drag. False when the preference is off or the window has no
+    /// title-bar point that can be pressed safely, in which case the caller falls back.
+    fileprivate func beginTitleBarDrag() -> Bool {
+        guard PreferencesManager.loadBool(for: .moveByTitleBar, defaultValue: true),
+              let window = trackedWindow,
+              let grab = WindowManager.titleBarGrabPoint(of: window),
+              let held = CGEvent(source: nil)?.location else { return false }
+
+        let drag = TitleBarDrag(grabPoint: grab, heldPoint: held)
+        titleBarDrag = drag
+
+        // Hide the real pointer before it jumps to the title bar, and show the stand-in where it was.
+        BackgroundCursor.enable()
+        CGDisplayHideCursor(CGMainDisplayID())
+        cursorStandIn.show(cursor(for: .move), atQuartz: held)
+
+        // Pressing with Command held lets the window move without bringing its app forward, which
+        // is what "Focus on window" switched off asks for.
+        postSyntheticMouse(.leftMouseDown, at: grab, flags: shouldFocusWindow ? [] : .maskCommand)
+
+        // No button is held during a keyboard move, so the hardware sends plain moves; the drag
+        // needs drags. Rewriting them in place keeps the pointer's own position and timing.
+        CGEventSupervisor.shared.subscribe(as: Self.titleBarDragSubscriber, to: .cgEvents(.mouseMoved)) { [weak self] event in
+            guard event.getIntegerValueField(.eventSourceUserData) != Self.syntheticEventMarker else { return }
+            event.type = .leftMouseDragged
+            event.flags = []
+            guard let self, let drag = self.titleBarDrag else { return }
+            self.cursorStandIn.show(self.cursor(for: .move), atQuartz: drag.held(forPointerAt: event.location))
+        }
+        return true
+    }
+
+    /// Releases the title bar, puts the real pointer back where the user holds the window, and
+    /// shows it again. Does nothing when the move was not a title-bar drag.
+    fileprivate func endTitleBarDrag() {
+        guard let drag = titleBarDrag else { return }
+        titleBarDrag = nil
+        CGEventSupervisor.shared.cancel(subscriber: Self.titleBarDragSubscriber)
+
+        let pointer = CGEvent(source: nil)?.location ?? drag.grabPoint
+        postSyntheticMouse(.leftMouseUp, at: pointer, flags: [])
+
+        // Warp only once the release has been processed: warping while the drag is still live
+        // would drag the window along with the pointer.
+        let back = drag.held(forPointerAt: pointer)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            CGWarpMouseCursorPosition(back)
+            // Warping suspends the hardware pointer for a moment; give it back right away.
+            CGAssociateMouseAndMouseCursorPosition(1)
+            CGDisplayShowCursor(CGMainDisplayID())
+            self?.cursorStandIn.hide()
+        }
+    }
+
+    private func postSyntheticMouse(_ type: CGEventType, at point: CGPoint, flags: CGEventFlags) {
+        guard let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: .left) else { return }
+        event.flags = flags
+        event.setIntegerValueField(.mouseEventClickState, value: 1)
+        event.setIntegerValueField(.eventSourceUserData, value: Self.syntheticEventMarker)
+        event.post(tap: .cghidEventTap)
+    }
+}
+
+/// A click-through window that draws a cursor image at a given point, standing in for the real
+/// cursor while it is hidden.
+private final class CursorStandInWindow {
+    private let window: NSWindow
+    private let imageView: NSImageView
+
+    init() {
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1, height: 1), styleMask: .borderless, backing: .buffered, defer: false)
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.hasShadow = false
+        window.ignoresMouseEvents = true
+        window.level = .screenSaver
+        window.isExcludedFromWindowsMenu = true
+        window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary, .transient]
+        imageView = NSImageView(frame: NSRect(x: 0, y: 0, width: 1, height: 1))
+        imageView.autoresizingMask = [.width, .height]
+        imageView.imageScaling = .scaleNone
+        window.contentView = imageView
+    }
+
+    /// Places the image so the cursor's hot spot sits on `point` (Quartz coordinates).
+    func show(_ cursor: NSCursor, atQuartz point: CGPoint) {
+        let image = cursor.image
+        if imageView.image !== image { imageView.image = image }
+        let mainHeight = NSScreen.screens.first?.frame.height ?? 0
+        // The hot spot is measured from the image's top-left corner; window frames from bottom-left.
+        let origin = NSPoint(x: point.x - cursor.hotSpot.x,
+                             y: (mainHeight - point.y) - (image.size.height - cursor.hotSpot.y))
+        window.setFrame(NSRect(origin: origin, size: image.size), display: window.isVisible)
+        if !window.isVisible { window.orderFrontRegardless() }
+    }
+
+    func hide() {
+        window.orderOut(nil)
     }
 }
