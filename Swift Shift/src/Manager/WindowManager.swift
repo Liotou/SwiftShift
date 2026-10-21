@@ -232,6 +232,47 @@ class WindowManager {
         return self.axRect(fromAppKit: chosen.visibleFrame)
     }
 
+    private static let nativeDragGestureKey = "NSWindowShouldDragOnGesture" as CFString
+
+    /// Whether macOS's Control-Command drag from anywhere in a window is on (a global, hidden setting
+    /// that apps read when they launch).
+    static func isNativeDragGestureEnabled() -> Bool {
+        CFPreferencesCopyAppValue(nativeDragGestureKey, kCFPreferencesAnyApplication) as? Bool ?? false
+    }
+
+    /// Same as `defaults write -g NSWindowShouldDragOnGesture -bool true`. Apps already running keep
+    /// the value they read at launch.
+    static func setNativeDragGestureEnabled(_ enabled: Bool) {
+        CFPreferencesSetValue(nativeDragGestureKey, enabled ? kCFBooleanTrue : nil,
+                              kCFPreferencesAnyApplication, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
+        CFPreferencesSynchronize(kCFPreferencesAnyApplication, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
+    }
+
+    /// The WindowServer window matching an AX window (same owner, same frame), with that frame.
+    static func windowServerWindow(matching window: AXUIElement) -> (number: CGWindowID, frame: CGRect)? {
+        guard let frame = getFrame(window: window) else { return nil }
+        var pid: pid_t = 0
+        AXUIElementGetPid(window, &pid)
+        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: AnyObject]] ?? []
+        for info in list where (info[kCGWindowOwnerPID as String] as? pid_t) == pid && (info[kCGWindowLayer as String] as? Int ?? 0) == 0 {
+            guard let bounds = info[kCGWindowBounds as String] as? [String: CGFloat],
+                  let rect = CGRect(dictionaryRepresentation: bounds as CFDictionary),
+                  let number = info[kCGWindowNumber as String] as? CGWindowID else { continue }
+            if abs(rect.minX - frame.minX) < 2, abs(rect.minY - frame.minY) < 2,
+               abs(rect.width - frame.width) < 2, abs(rect.height - frame.height) < 2 {
+                return (number, rect)
+            }
+        }
+        return nil
+    }
+
+    /// A window's frame as the WindowServer has it right now. Unlike AX, it is live during a drag.
+    static func windowServerFrame(of number: CGWindowID) -> CGRect? {
+        let list = CGWindowListCopyWindowInfo([.optionIncludingWindow], number) as? [[String: AnyObject]] ?? []
+        guard let bounds = list.first?[kCGWindowBounds as String] as? [String: CGFloat] else { return nil }
+        return CGRect(dictionaryRepresentation: bounds as CFDictionary)
+    }
+
     /// The focused window of the frontmost app, used as a fallback when the cursor
     /// is not over a window. Skips our own app and ignored apps.
     static func getFocusedWindow() -> AXUIElement? {

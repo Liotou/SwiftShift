@@ -36,6 +36,8 @@ struct PreferencesView: View {
   @AppStorage(PreferenceKey.focusOnApp.rawValue) private var focusOnApp = true
   @AppStorage(PreferenceKey.useQuadrants.rawValue) private var useQuadrants = false
   @AppStorage(PreferenceKey.snapToWindows.rawValue) private var snapToWindows = true
+  @AppStorage(PreferenceKey.nativeDrag.rawValue) private var nativeDrag = true
+  @State private var nativeDragGestureEnabled = WindowManager.isNativeDragGestureEnabled()
   @AppStorage(PreferenceKey.doubleTapModifierActions.rawValue) private var doubleTapModifierActions = false
   @AppStorage(PreferenceKey.doubleTapActionsSwapped.rawValue) private var doubleTapActionsSwapped = false
 
@@ -76,6 +78,29 @@ struct PreferencesView: View {
         subtitle: "Resize from nearest edge/corner",
         icon: "rectangle.split.2x2"
       )
+
+      PreferenceToggle(
+        isOn: $nativeDrag,
+        title: "Native window drag",
+        subtitle: "Keyboard move, smooth across displays",
+        icon: "hand.draw"
+      )
+
+      if nativeDrag && !nativeDragGestureEnabled {
+        HStack(spacing: 6) {
+          Text("Needs macOS's \u{2303}\u{2318} window drag. Apps already open must be relaunched.")
+            .font(.system(size: 10))
+            .foregroundStyle(.orange)
+            .fixedSize(horizontal: false, vertical: true)
+          Spacer()
+          Button("Turn on") {
+            WindowManager.setNativeDragGestureEnabled(true)
+            nativeDragGestureEnabled = WindowManager.isNativeDragGestureEnabled()
+          }
+          .controlSize(.small)
+        }
+        .padding(.leading, 26)
+      }
 
       PreferenceToggle(
         isOn: $snapToWindows,

@@ -1,5 +1,6 @@
 import Cocoa
 import Accessibility
+import CGEventSupervisor
 enum MouseAction: String { case move, resize, none }
 enum Quadrant { case topLeft, top, topRight, left, center, right, bottomLeft, bottom, bottomRight }
 private enum MouseLocationCoordinateSpace { case appKit, coreGraphics }
@@ -23,6 +24,7 @@ class MouseTracker {
     private var isOverridingCursor = false
     private var pinnedCursor: NSCursor?
     private var cursorPinTimer: DispatchSourceTimer?
+    private var nativeDrag: NativeDrag?
     private init() { registerForSpaceChangeNotifications() }
     deinit { unregisterForSpaceChangeNotifications() }
     private func registerForSpaceChangeNotifications() {
@@ -36,7 +38,13 @@ class MouseTracker {
     func startTracking(for action: MouseAction, button: MouseButton) {
         if currentAction != .none { stopTracking(for: currentAction) }
         prepareTracking(for: action, mouseLocation: NSEvent.mouseLocation, coordinateSpace: .appKit)
-        if trackedWindow != nil { registerMouseEventMonitor(button: button); startTrackingTimer(); isTracking = true; applyCursor() }
+        guard trackedWindow != nil else { return }
+        // A keyboard move is carried out as macOS's own window drag when it can be (see
+        // `beginNativeDrag`); otherwise, and for every other gesture, the window follows the pointer
+        // through AX writes.
+        let isNative = action == .move && button == .none && beginNativeDrag()
+        if !isNative { registerMouseEventMonitor(button: button) }
+        startTrackingTimer(); isTracking = true; applyCursor()
     }
     @discardableResult
     func startTrackingForExternalMouseUpdates(for action: MouseAction, initialMouseLocation: NSPoint) -> Bool {
@@ -52,6 +60,7 @@ class MouseTracker {
     }
     func stopTracking(for action: MouseAction) {
         guard currentAction == action else { return }
+        endNativeDrag()
         // Apply the final pending move/resize while Enhanced UI is still disabled (fast path),
         // then restore the attribute, then run the remaining cleanup.
         flushQueuedExternalMouseUpdate(); flushPendingMouseUpdate()
@@ -461,5 +470,132 @@ private enum BackgroundCursor {
         let connectionID = unsafeBitCast(connectionSymbol, to: MainConnectionID.self)()
         let setProperty = unsafeBitCast(propertySymbol, to: SetConnectionProperty.self)
         _ = setProperty(connectionID, connectionID, "SetsCursorInBackground" as CFString, kCFBooleanTrue)
+    }
+}
+
+// MARK: - Native drag
+
+/// A keyboard move carried out as macOS's own window drag rather than by writing the window's
+/// position through Accessibility.
+///
+/// AX writes make the window lag behind a slow app, and stutter across displays: Stage Manager takes
+/// over a window that a program moves onto another display and re-places it itself (measured on a
+/// 2x and two 1x displays: pauses of up to 300 ms and jumps of over 1,000 pt per crossing). A window
+/// drag run by the WindowServer crosses displays like a drag with the mouse, the part still on the
+/// old display turning translucent.
+///
+/// macOS drags a window from anywhere inside it on Control-Command + click and drag, once
+/// `NSWindowShouldDragOnGesture` is on. The move uses exactly that, from where the pointer already
+/// is, so the window is held where the user points at it and the pointer never moves:
+///
+/// - The press is simulated, since a keyboard move has no button down. It is posted at the HID tap
+///   with the modifiers the user is actually holding: an event posted there also sets the system's
+///   modifier state, so any other flags would press or release keys behind the user's back (a press
+///   "without Control" released the Control key held for the move, ending it). Command is added
+///   downstream, in the session tap, where it changes only what the app sees.
+/// - The hardware keeps sending plain moves, which say no button is down and are not taken as drags
+///   (measured with a real mouse: rewritten in place, the window never moved). Each one is dropped
+///   and replaced by a real drag, posted at the HID tap with the held modifiers. Drags made any other
+///   way made the window leap by 250 to 430 pt at each display crossing; these did not (measured: no
+///   jump, window within 1 pt of its target, pointer still where the window was grabbed).
+private struct NativeDrag {
+    /// Where the pointer was, and the press was made, when the move began.
+    let pressPoint: CGPoint
+    /// The window in the WindowServer and its frame there when the move began, to notice a window
+    /// that does not follow. Nil when it could not be identified.
+    let windowNumber: CGWindowID?
+    let startFrame: CGRect?
+    var moves = 0
+    var followConfirmed = false
+}
+
+extension MouseTracker {
+    private static let nativeDragSubscriber = "nativeDrag"
+    /// Marks the mouse events SwiftShift posts itself. Same value as MouseChordActionManager's
+    /// replay marker, so that manager lets them through too.
+    private static let syntheticEventMarker: Int64 = 0x5357465453484946
+
+    /// Starts the move as a native drag. False when the preference or macOS's gesture is off, in
+    /// which case the caller falls back to AX writes.
+    fileprivate func beginNativeDrag() -> Bool {
+        guard PreferencesManager.loadBool(for: .nativeDrag, defaultValue: true),
+              WindowManager.isNativeDragGestureEnabled(),
+              let window = trackedWindow,
+              let press = CGEvent(source: nil)?.location else { return false }
+
+        let server = WindowManager.windowServerWindow(matching: window)
+        nativeDrag = NativeDrag(pressPoint: press, windowNumber: server?.number, startFrame: server?.frame)
+        if shouldFocusWindow { WindowManager.focus(window: window); trackedWindowIsFocused = true }
+
+        CGEventSupervisor.shared.subscribe(as: Self.nativeDragSubscriber, to: .cgEvents(.leftMouseDown, .mouseMoved)) { [weak self] event in
+            self?.handleNativeDragEvent(event)
+        }
+        postNativeDragMouse(.leftMouseDown, at: press)
+        TrackpadDebugLog.write("native drag: begin at \(press) window=\(server.map { "\($0.number) \($0.frame)" } ?? "unidentified")")
+        return true
+    }
+
+    /// Releases the simulated button. Does nothing when the move was not a native drag.
+    fileprivate func endNativeDrag() {
+        guard let drag = nativeDrag else { return }
+        nativeDrag = nil
+        CGEventSupervisor.shared.cancel(subscriber: Self.nativeDragSubscriber)
+        let pointer = CGEvent(source: nil)?.location ?? drag.pressPoint
+        postNativeDragMouse(.leftMouseUp, at: pointer)
+        TrackpadDebugLog.write("native drag: end after \(drag.moves) moves at \(pointer)")
+    }
+
+    private func handleNativeDragEvent(_ event: CGEvent) {
+        let isOurs = event.getIntegerValueField(.eventSourceUserData) == Self.syntheticEventMarker
+        switch event.type {
+        case .leftMouseDown where isOurs:
+            // Turns our press into macOS's drag-from-anywhere gesture for the app receiving it.
+            event.flags = event.flags.union([.maskControl, .maskCommand])
+        case .mouseMoved where !isOurs:
+            event.cancel()
+            postNativeDragMouse(.leftMouseDragged, at: event.location, flags: event.flags)
+            checkTheWindowFollows(pointer: event.location)
+        default:
+            break
+        }
+    }
+
+    /// Posted at the HID tap, carrying the modifiers the user is holding unless told otherwise, so
+    /// the system's modifier state stays as it is.
+    private func postNativeDragMouse(_ type: CGEventType, at point: CGPoint, flags: CGEventFlags? = nil) {
+        guard let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: .left) else { return }
+        event.flags = flags ?? CGEventSource.flagsState(.hidSystemState)
+        event.setIntegerValueField(.mouseEventClickState, value: 1)
+        event.setIntegerValueField(.eventSourceUserData, value: Self.syntheticEventMarker)
+        event.post(tap: .cghidEventTap)
+    }
+
+    /// An app that does not handle macOS's gesture (or was opened before it was turned on) leaves its
+    /// window in place. Once the pointer has clearly travelled and the WindowServer still shows the
+    /// window where it started, the simulated button is released and the rest of the move follows the
+    /// pointer through AX writes, as before. The WindowServer's frame is read, not AX's, which lags
+    /// during a native drag.
+    private func checkTheWindowFollows(pointer: CGPoint) {
+        guard var drag = nativeDrag, !drag.followConfirmed else { return }
+        drag.moves += 1
+        nativeDrag = drag
+        guard let number = drag.windowNumber, let start = drag.startFrame, drag.moves % 4 == 0,
+              hypot(pointer.x - drag.pressPoint.x, pointer.y - drag.pressPoint.y) > 40 else { return }
+        if let frame = WindowManager.windowServerFrame(of: number),
+           abs(frame.minX - start.minX) + abs(frame.minY - start.minY) > 2 {
+            nativeDrag?.followConfirmed = true
+            return
+        }
+        TrackpadDebugLog.write("native drag: window did not follow, falling back to AX moves")
+        // Out of the event tap callback first: cancelling the subscription rebuilds the tap.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.nativeDrag != nil, self.isTracking, let window = self.trackedWindow else { return }
+            self.endNativeDrag()
+            self.mouseLocationCoordinateSpace = .appKit
+            self.initialMouseLocation = NSEvent.mouseLocation
+            self.initialWindowLocation = WindowManager.getPosition(window: window)
+            AXWindowWriter.shared.reset(origin: self.initialWindowLocation, size: self.windowSize)
+            self.registerMouseEventMonitor(button: .none)
+        }
     }
 }
