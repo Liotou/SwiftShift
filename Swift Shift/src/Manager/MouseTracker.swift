@@ -26,6 +26,7 @@ class MouseTracker {
     private var cursorPinTimer: DispatchSourceTimer?
     private var titleBarDrag: TitleBarDrag?
     private var titleBarDragConverted = 0
+    private var titleBarDragStartOrigin: NSPoint?
     private lazy var cursorStandIn = CursorStandInWindow()
     private init() { registerForSpaceChangeNotifications() }
     deinit { unregisterForSpaceChangeNotifications() }
@@ -522,6 +523,7 @@ extension MouseTracker {
         let drag = TitleBarDrag(grabPoint: grab, heldPoint: held)
         titleBarDrag = drag
         titleBarDragConverted = 0
+        titleBarDragStartOrigin = WindowManager.getPosition(window: window)
         let app = WindowManager.getNSApplication(from: window)?.localizedName ?? "?"
         let start = WindowManager.getFrame(window: window).map { "\($0)" } ?? "?"
         TrackpadDebugLog.write("titlebar: begin app=\(app) frame=\(start) grab=\(grab) held=\(held) focus=\(shouldFocusWindow) hidFlags=\(CGEventSource.flagsState(.hidSystemState).rawValue) sessionFlags=\(CGEventSource.flagsState(.combinedSessionState).rawValue)")
@@ -545,28 +547,63 @@ extension MouseTracker {
             TrackpadDebugLog.write("titlebar: after press leftButtonDown(hid)=\(CGEventSource.buttonState(.hidSystemState, button: .left)) leftButtonDown(session)=\(CGEventSource.buttonState(.combinedSessionState, button: .left)) pointer=\(CGEvent(source: nil)?.location ?? .zero)")
         }
 
-        // No button is held during a keyboard move, so the hardware sends plain moves; the drag
-        // needs drags. Rewriting them in place keeps the pointer's own position and timing.
+        // No button is held during a keyboard move, so the hardware sends plain moves; the drag needs
+        // drags. They are rewritten in place, keeping their hardware origin and timing: replacing them
+        // with drags made from scratch makes the window leap as the pointer enters another display
+        // (measured: +434 pt every time, whether posted at the session tap or, carrying the held
+        // modifiers, at the HID tap). A hardware move says no button is pressed, so the rewrite also
+        // fills in what a real drag with the button down carries: pressure and click state.
         CGEventSupervisor.shared.subscribe(as: Self.titleBarDragSubscriber, to: .cgEvents(.mouseMoved)) { [weak self] event in
             guard event.getIntegerValueField(.eventSourceUserData) != Self.syntheticEventMarker else { return }
-            let originalFlags = event.flags.rawValue
             event.type = .leftMouseDragged
             event.flags = []
+            event.setIntegerValueField(.mouseEventButtonNumber, value: 0)
+            event.setIntegerValueField(.mouseEventClickState, value: 1)
+            event.setDoubleValueField(.mouseEventPressure, value: 1)
             guard let self, let drag = self.titleBarDrag else { return }
+            let location = event.location
             self.titleBarDragConverted += 1
+            self.cursorStandIn.show(self.cursor(for: .move), atQuartz: drag.held(forPointerAt: location))
             if self.titleBarDragConverted <= 3 || self.titleBarDragConverted % 40 == 0 {
                 let window = self.trackedWindow.flatMap { WindowManager.getPosition(window: $0) }.map { "\($0)" } ?? "?"
-                TrackpadDebugLog.write("titlebar: move #\(self.titleBarDragConverted) at \(event.location) originalFlags=\(originalFlags) pressure=\(event.getDoubleValueField(.mouseEventPressure)) windowAX=\(window)")
+                TrackpadDebugLog.write("titlebar: drag #\(self.titleBarDragConverted) at \(location) windowAX=\(window)")
             }
-            self.cursorStandIn.show(self.cursor(for: .move), atQuartz: drag.held(forPointerAt: event.location))
+            self.fallBackIfTheWindowDoesNotFollow(pointer: location)
         }
         return true
     }
 
+    /// Some windows ignore a press on their title bar posted by another app. Once the pointer has
+    /// clearly travelled and the window still sits where it started, the title bar is released and
+    /// the rest of the move follows the pointer through Accessibility, as before, from wherever the
+    /// pointer is now. Checked every few moves, so the AX read costs little.
+    private func fallBackIfTheWindowDoesNotFollow(pointer: CGPoint) {
+        guard let drag = titleBarDrag, let window = trackedWindow, let startOrigin = titleBarDragStartOrigin,
+              titleBarDragConverted % 6 == 0 else { return }
+        let travel = hypot(pointer.x - drag.grabPoint.x, pointer.y - drag.grabPoint.y)
+        guard travel > 60, let origin = WindowManager.getPosition(window: window),
+              hypot(origin.x - startOrigin.x, origin.y - startOrigin.y) < 2 else {
+            if travel > 60 { titleBarDragStartOrigin = nil } // it follows: stop checking
+            return
+        }
+        TrackpadDebugLog.write("titlebar: window did not follow after \(Int(travel)) pt, falling back to AX moves")
+        // Carry on as an ordinary move, baselined once the pointer is back under the user's hand:
+        // a baseline taken before that warp would shift the window by the warp itself.
+        _ = endTitleBarDrag { [weak self] in
+            guard let self, self.isTracking, self.currentAction == .move, let window = self.trackedWindow else { return }
+            self.mouseLocationCoordinateSpace = .appKit
+            self.initialMouseLocation = NSEvent.mouseLocation
+            self.initialWindowLocation = WindowManager.getPosition(window: window) ?? origin
+            AXWindowWriter.shared.reset(origin: self.initialWindowLocation, size: self.windowSize)
+            self.registerMouseEventMonitor(button: .none)
+            self.applyCursor()
+        }
+    }
+
     /// Releases the title bar, puts the real pointer back where the user holds the window, and
-    /// only then gives it its image back. Returns false, doing nothing, when the move was not a
-    /// title-bar drag.
-    fileprivate func endTitleBarDrag() -> Bool {
+    /// only then gives it its image back, or runs `continuation` instead when the move carries on
+    /// another way. Returns false, doing nothing, when the move was not a title-bar drag.
+    fileprivate func endTitleBarDrag(continuation: (() -> Void)? = nil) -> Bool {
         guard let drag = titleBarDrag else { return false }
         titleBarDrag = nil
         CGEventSupervisor.shared.cancel(subscriber: Self.titleBarDragSubscriber)
@@ -583,7 +620,7 @@ extension MouseTracker {
             CGWarpMouseCursorPosition(back)
             // Warping suspends the hardware pointer for a moment; give it back right away.
             CGAssociateMouseAndMouseCursorPosition(1)
-            self?.resetCursor()
+            if let continuation { continuation() } else { self?.resetCursor() }
             self?.cursorStandIn.hide()
         }
         return true
@@ -599,16 +636,16 @@ extension MouseTracker {
         return NSCursor(image: image, hotSpot: .zero)
     }()
 
-    /// Posted at the session tap, not the HID tap: an event posted at the HID tap also rewrites the
-    /// system's modifier state, so pressing the title bar "without Control" there released the
-    /// Control key the user is holding for the move, which ended the move straight away (measured).
-    /// At the session tap the modifier state is left as it is.
-    private func postSyntheticMouse(_ type: CGEventType, at point: CGPoint, flags: CGEventFlags) {
+    /// Posted at the session tap by default, not the HID tap: an event posted at the HID tap also
+    /// rewrites the system's modifier state, so pressing the title bar "without Control" there
+    /// released the Control key the user is holding for the move, which ended the move straight
+    /// away (measured). At the session tap the modifier state is left as it is.
+    private func postSyntheticMouse(_ type: CGEventType, at point: CGPoint, flags: CGEventFlags, tap: CGEventTapLocation = .cgSessionEventTap) {
         guard let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: .left) else { return }
         event.flags = flags
         event.setIntegerValueField(.mouseEventClickState, value: 1)
         event.setIntegerValueField(.eventSourceUserData, value: Self.syntheticEventMarker)
-        event.post(tap: .cgSessionEventTap)
+        event.post(tap: tap)
     }
 }
 
