@@ -708,79 +708,64 @@ extension MouseTracker {
 }
 
 /// Draws a cursor image where the user's pointer is, standing in for the real pointer while it is
-/// invisible. One click-through overlay per display is put up when the drag starts and stays put;
-/// only a layer inside it moves. Moving a window at every event, as this used to, now and then held
-/// the WindowServer's event stream for half a second in mid-drag (measured, when other processes
-/// were reading the window list meanwhile), and the window then landed off target.
+/// invisible. The image is a layer in a click-through window a little larger than the hand, which
+/// moves only when the hand nears its edge, a few times per drag. Moving a window at every event
+/// now and then held the WindowServer's event stream for half a second in mid-drag (measured, when
+/// other processes were reading the window list meanwhile); an overlay covering each display
+/// instead took away the translucent look of a window crossing displays.
 private final class CursorStandIn {
-    private struct Overlay {
-        /// The display's frame in Quartz coordinates.
-        let frame: CGRect
-        let window: NSWindow
-        let layer: CALayer
+    private static let side: CGFloat = 400
+    /// How close to the window's edge the hot spot may come before the window recentres on it.
+    private static let margin: CGFloat = 64
+    private let window: NSWindow
+    private let layer = CALayer()
+
+    init() {
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: Self.side, height: Self.side), styleMask: .borderless, backing: .buffered, defer: false)
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.hasShadow = false
+        window.ignoresMouseEvents = true
+        window.level = .screenSaver
+        window.isExcludedFromWindowsMenu = true
+        window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary, .transient]
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: Self.side, height: Self.side))
+        view.wantsLayer = true
+        view.layer?.addSublayer(layer)
+        window.contentView = view
     }
-    private var overlays: [Overlay] = []
-    private var isShown = false
 
     /// Places the image so the cursor's hot spot sits on `point` (Quartz coordinates).
     func show(_ cursor: NSCursor, atQuartz point: CGPoint) {
-        if !isShown {
-            if overlays.map(\.frame) != Self.displayFrames() { build() }
-            overlays.forEach { $0.window.orderFrontRegardless() }
-            isShown = true
+        let mainHeight = NSScreen.screens.first?.frame.height ?? 0
+        let appKitPoint = NSPoint(x: point.x, y: mainHeight - point.y)
+        let inner = window.frame.insetBy(dx: Self.margin, dy: Self.margin)
+        if !window.isVisible || !inner.contains(appKitPoint) {
+            // Recentred on the hand, and kept whole on the hand's display: with a Space per display,
+            // a window straddling two shows on one only.
+            let screen = NSScreen.screens.first { $0.frame.contains(appKitPoint) } ?? NSScreen.main
+            var frame = NSRect(x: appKitPoint.x - Self.side / 2, y: appKitPoint.y - Self.side / 2, width: Self.side, height: Self.side)
+            if let bounds = screen?.frame {
+                frame.origin.x = min(max(frame.minX, bounds.minX), bounds.maxX - Self.side)
+                frame.origin.y = min(max(frame.minY, bounds.minY), bounds.maxY - Self.side)
+            }
+            window.setFrame(frame, display: false)
+            if !window.isVisible { window.orderFrontRegardless() }
         }
+        let image = cursor.image, scale = window.backingScaleFactor
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        for overlay in overlays {
-            guard overlay.frame.contains(point) else { overlay.layer.isHidden = true; continue }
-            let image = cursor.image, scale = overlay.window.backingScaleFactor
-            overlay.layer.contents = image.layerContents(forContentsScale: scale)
-            overlay.layer.contentsScale = scale
-            // The hot spot is measured from the image's top-left corner; the layer from the
-            // overlay's bottom-left one.
-            overlay.layer.frame = CGRect(x: point.x - overlay.frame.minX - cursor.hotSpot.x,
-                                         y: overlay.frame.maxY - point.y - (image.size.height - cursor.hotSpot.y),
-                                         width: image.size.width, height: image.size.height)
-            overlay.layer.isHidden = false
-        }
+        layer.contents = image.layerContents(forContentsScale: scale)
+        layer.contentsScale = scale
+        // The hot spot is measured from the image's top-left corner; the layer from the window's
+        // bottom-left one.
+        layer.frame = CGRect(x: appKitPoint.x - window.frame.minX - cursor.hotSpot.x,
+                             y: appKitPoint.y - window.frame.minY - (image.size.height - cursor.hotSpot.y),
+                             width: image.size.width, height: image.size.height)
         CATransaction.commit()
     }
 
     func hide() {
-        guard isShown else { return }
-        isShown = false
-        overlays.forEach { $0.window.orderOut(nil) }
-    }
-
-    private func build() {
-        overlays.forEach { $0.window.orderOut(nil) }
-        overlays = NSScreen.screens.compactMap { screen in
-            guard let frame = Self.quartzFrame(of: screen) else { return nil }
-            let window = NSWindow(contentRect: screen.frame, styleMask: .borderless, backing: .buffered, defer: false)
-            window.isOpaque = false
-            window.backgroundColor = .clear
-            window.hasShadow = false
-            window.ignoresMouseEvents = true
-            window.level = .screenSaver
-            window.isExcludedFromWindowsMenu = true
-            window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary, .transient]
-            window.setFrame(screen.frame, display: false)
-            let view = NSView(frame: NSRect(origin: .zero, size: screen.frame.size))
-            view.wantsLayer = true
-            let layer = CALayer()
-            layer.isHidden = true
-            view.layer?.addSublayer(layer)
-            window.contentView = view
-            return Overlay(frame: frame, window: window, layer: layer)
-        }
-    }
-
-    private static func quartzFrame(of screen: NSScreen) -> CGRect? {
-        guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return nil }
-        return CGDisplayBounds(CGDirectDisplayID(number.uint32Value))
-    }
-
-    private static func displayFrames() -> [CGRect] {
-        NSScreen.screens.compactMap(quartzFrame(of:))
+        window.orderOut(nil)
     }
 }
