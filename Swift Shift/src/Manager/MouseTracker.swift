@@ -592,12 +592,14 @@ extension MouseTracker {
             Self.trace("press", drag)
             return
         }
-        var delta = CGPoint(x: event.getDoubleValueField(.mouseEventDeltaX), y: event.getDoubleValueField(.mouseEventDeltaY))
-        if delta == .zero {
-            // A move posted by software may carry no delta; it is then counted from where the
-            // pointer is, pressed on the title bar.
-            delta = CGPoint(x: location.x - drag.pressed.x, y: location.y - drag.pressed.y)
-        }
+        // The move is measured from where the pointer was when it was made: the pressed pointer on the
+        // title bar, or, for a move already on its way when the press was posted, the user's own
+        // pointer, whichever the move's position is nearest. Positions, unlike deltas, add up right
+        // when the system merges moves that come too fast (up to 14% of a long move was lost).
+        let fromPressed = hypot(location.x - drag.pressed.x, location.y - drag.pressed.y)
+        let fromPointer = hypot(location.x - drag.pointer.x, location.y - drag.pointer.y)
+        let base = fromPressed <= fromPointer ? drag.pressed : drag.pointer
+        var delta = CGPoint(x: location.x - base.x, y: location.y - base.y)
         // No hand moves that far in one event: a stray value would throw the pointer off screen.
         if !delta.x.isFinite || !delta.y.isFinite || abs(delta.x) > 400 || abs(delta.y) > 400 { delta = .zero }
         drag.pointer = Self.keptOnScreen(CGPoint(x: drag.pointer.x + delta.x, y: drag.pointer.y + delta.y))
