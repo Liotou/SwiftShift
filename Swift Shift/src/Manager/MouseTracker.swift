@@ -522,12 +522,14 @@ private struct TitleBarDrag {
     let startFrame: CGRect?
     var moves = 0
     var followConfirmed = false
+    /// Added to the pressed pointer when the drag started late and the window trails the hand.
+    var correction = CGPoint.zero
     /// The first drag after the press, and when it came: the follow check measures from there.
     var firstDrag: (location: CGPoint, time: TimeInterval)?
 
     /// Where the pressed pointer is on the title bar: it travels with the user's.
     var titleBarPoint: CGPoint {
-        CGPoint(x: grabPoint.x + pointer.x - heldPoint.x, y: grabPoint.y + pointer.y - heldPoint.y)
+        CGPoint(x: grabPoint.x + pointer.x - heldPoint.x + correction.x, y: grabPoint.y + pointer.y - heldPoint.y + correction.y)
     }
 }
 
@@ -553,7 +555,10 @@ extension MouseTracker {
         guard PreferencesManager.loadBool(for: .nativeDrag, defaultValue: true),
               let window = trackedWindow,
               let held = CGEvent(source: nil)?.location,
-              let grab = WindowManager.titleBarGrabPoint(of: window, nearX: held.x) else { return false }
+              let grab = WindowManager.titleBarGrabPoint(of: window, nearX: held.x),
+              // Pressed far to the side of the hand, the window would answer to a pointer the user
+              // cannot see (tiling, Stage Manager, display changes): such windows move through AX.
+              abs(grab.x - held.x) <= 140 else { return false }
         let server = WindowManager.windowServerWindow(matching: window)
         titleBarDrag = TitleBarDrag(grabPoint: grab, heldPoint: held, pointer: held, pressed: grab, windowNumber: server?.number, startFrame: server?.frame)
         CGEventSupervisor.shared.subscribe(as: Self.titleBarDragSubscriber,
@@ -595,6 +600,8 @@ extension MouseTracker {
             // pointer is, pressed on the title bar.
             delta = CGPoint(x: location.x - drag.pressed.x, y: location.y - drag.pressed.y)
         }
+        // No hand moves that far in one event: a stray value would throw the pointer off screen.
+        if !delta.x.isFinite || !delta.y.isFinite || abs(delta.x) > 400 || abs(delta.y) > 400 { delta = .zero }
         drag.pointer = Self.keptOnScreen(CGPoint(x: drag.pointer.x + delta.x, y: drag.pointer.y + delta.y))
         drag.pressed = Self.clearOfEdges(drag.titleBarPoint)
         titleBarDrag = drag
@@ -682,6 +689,15 @@ extension MouseTracker {
         if let frame = WindowManager.windowServerFrame(of: number),
            abs(frame.minX - start.minX) + abs(frame.minY - start.minY) > 2 {
             titleBarDrag?.followConfirmed = true
+            // An app that starts the drag itself (Safari, Mail, Notes) may start it late, anchored
+            // where the pointer had got to by then: the window would trail the hand by that much for
+            // the rest of the drag. The pressed pointer is moved on by it, and the window catches up.
+            let lag = CGPoint(x: (drag.pointer.x - drag.heldPoint.x) - (frame.minX - start.minX),
+                              y: (drag.pointer.y - drag.heldPoint.y) - (frame.minY - start.minY))
+            if abs(lag.x) > 24 || abs(lag.y) > 24 {
+                titleBarDrag?.correction = lag
+                TrackpadDebugLog.write("titlebar: drag started late, catching up \(lag)")
+            }
             return
         }
         TrackpadDebugLog.write("titlebar: window did not follow, falling back to AX moves")
