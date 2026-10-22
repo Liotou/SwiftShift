@@ -595,8 +595,8 @@ extension MouseTracker {
             // pointer is, pressed on the title bar.
             delta = CGPoint(x: location.x - drag.pressed.x, y: location.y - drag.pressed.y)
         }
-        drag.pointer = Self.keptOnScreen(CGPoint(x: drag.pointer.x + delta.x, y: drag.pointer.y + delta.y), from: drag.pointer)
-        drag.pressed = Self.clearOfEdges(drag.titleBarPoint, from: drag.pressed)
+        drag.pointer = Self.keptOnScreen(CGPoint(x: drag.pointer.x + delta.x, y: drag.pointer.y + delta.y))
+        drag.pressed = Self.clearOfEdges(drag.titleBarPoint)
         titleBarDrag = drag
         postSyntheticMouse(.leftMouseDragged, at: drag.pressed, flags: heldModifiers)
         cursorStandIn.show(cursor(for: .move), atQuartz: drag.pointer)
@@ -623,8 +623,8 @@ extension MouseTracker {
     /// fills the screen), and the pressed pointer, above the user's hand, reaches the top edge long
     /// before the hand does: windows were thrown across the screen. The window cannot go above the
     /// menu bar anyway; edges shared with another display stay open, to cross over.
-    private static func clearOfEdges(_ point: CGPoint, from previous: CGPoint) -> CGPoint {
-        var p = keptOnScreen(point, from: previous)
+    private static func clearOfEdges(_ point: CGPoint) -> CGPoint {
+        var p = keptOnScreen(point)
         var display: CGDirectDisplayID = 0, count: UInt32 = 0
         guard CGGetDisplaysWithPoint(p, 1, &display, &count) == .success, count > 0 else { return p }
         let bounds = CGDisplayBounds(display), margin: CGFloat = 8
@@ -641,15 +641,19 @@ extension MouseTracker {
         return p
     }
 
-    /// `point`, kept on the displays the way the system keeps the pointer there: a move that would
-    /// leave them stops at the edge of the display the pointer was on.
-    private static func keptOnScreen(_ point: CGPoint, from previous: CGPoint) -> CGPoint {
+    /// `point`, kept on the displays the way the system keeps the pointer there: off them, it goes to
+    /// the nearest point of any display, so a move past a top edge still crosses to the next display
+    /// instead of sticking to the edge of the one it left.
+    private static func keptOnScreen(_ point: CGPoint) -> CGPoint {
         var display: CGDirectDisplayID = 0, count: UInt32 = 0
         if CGGetDisplaysWithPoint(point, 1, &display, &count) == .success, count > 0 { return point }
-        guard CGGetDisplaysWithPoint(previous, 1, &display, &count) == .success, count > 0 else { return point }
-        let bounds = CGDisplayBounds(display)
-        return CGPoint(x: min(max(point.x, bounds.minX), bounds.maxX - 1),
-                       y: min(max(point.y, bounds.minY), bounds.maxY - 1))
+        var ids = [CGDirectDisplayID](repeating: 0, count: 16), n: UInt32 = 0
+        guard CGGetActiveDisplayList(16, &ids, &n) == .success else { return point }
+        let candidates = ids.prefix(Int(n)).map { id -> CGPoint in
+            let b = CGDisplayBounds(id)
+            return CGPoint(x: min(max(point.x, b.minX), b.maxX - 1), y: min(max(point.y, b.minY), b.maxY - 1))
+        }
+        return candidates.min { hypot($0.x - point.x, $0.y - point.y) < hypot($1.x - point.x, $1.y - point.y) } ?? point
     }
 
     private func postSyntheticMouse(_ type: CGEventType, at point: CGPoint, flags: CGEventFlags) {
