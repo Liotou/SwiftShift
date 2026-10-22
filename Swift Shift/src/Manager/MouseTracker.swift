@@ -513,6 +513,8 @@ private struct TitleBarDrag {
     var heldPoint: CGPoint
     /// Where the user's pointer is now, as the moves' deltas carry it.
     var pointer: CGPoint
+    /// Where the pressed pointer is on the title bar, last posted.
+    var pressed: CGPoint
     var isPressed = false
     /// The window in the WindowServer and its frame there when the move began, to notice a press
     /// that did not start a drag. Nil when it could not be identified.
@@ -553,7 +555,7 @@ extension MouseTracker {
               let grab = WindowManager.titleBarGrabPoint(of: window),
               let held = CGEvent(source: nil)?.location else { return false }
         let server = WindowManager.windowServerWindow(matching: window)
-        titleBarDrag = TitleBarDrag(grabPoint: grab, heldPoint: held, pointer: held, windowNumber: server?.number, startFrame: server?.frame)
+        titleBarDrag = TitleBarDrag(grabPoint: grab, heldPoint: held, pointer: held, pressed: grab, windowNumber: server?.number, startFrame: server?.frame)
         CGEventSupervisor.shared.subscribe(as: Self.titleBarDragSubscriber,
                                            to: .cgEvents(.mouseMoved, .leftMouseDown, .leftMouseDragged, .leftMouseUp)) { [weak self] event in
             self?.handleTitleBarDragEvent(event)
@@ -591,12 +593,12 @@ extension MouseTracker {
         if delta == .zero {
             // A move posted by software may carry no delta; it is then counted from where the
             // pointer is, pressed on the title bar.
-            let pressed = drag.titleBarPoint
-            delta = CGPoint(x: location.x - pressed.x, y: location.y - pressed.y)
+            delta = CGPoint(x: location.x - drag.pressed.x, y: location.y - drag.pressed.y)
         }
         drag.pointer = Self.keptOnScreen(CGPoint(x: drag.pointer.x + delta.x, y: drag.pointer.y + delta.y), from: drag.pointer)
+        drag.pressed = Self.clearOfEdges(drag.titleBarPoint, from: drag.pressed)
         titleBarDrag = drag
-        postSyntheticMouse(.leftMouseDragged, at: drag.titleBarPoint, flags: heldModifiers)
+        postSyntheticMouse(.leftMouseDragged, at: drag.pressed, flags: heldModifiers)
         cursorStandIn.show(cursor(for: .move), atQuartz: drag.pointer)
         checkTheWindowFollows(pointer: drag.pointer)
     }
@@ -607,13 +609,36 @@ extension MouseTracker {
     /// WindowServer has it, read off the main thread.
     private static func trace(_ label: String, _ drag: TitleBarDrag, after delay: TimeInterval = 0) {
         guard TrackpadDebugLog.enabled, let number = drag.windowNumber else { return }
-        let user = drag.pointer, pressed = drag.titleBarPoint
+        let user = drag.pointer, pressed = drag.pressed
         traceQueue.asyncAfter(deadline: .now() + delay) {
             let f = WindowManager.windowServerFrame(of: number) ?? .null
             let line = String(format: "titlebar: %@ user=(%.0f, %.0f) pressed=(%.0f, %.0f) window=(%.0f, %.0f, %.0f x %.0f)",
                               label, user.x, user.y, pressed.x, pressed.y, f.minX, f.minY, f.width, f.height)
             DispatchQueue.main.async { TrackpadDebugLog.write(line) }
         }
+    }
+
+    /// The pressed pointer, kept on the displays and clear of their outer edges and menu bars. A
+    /// window dragged with the pointer against an edge is tiled by macOS (against the top one, it
+    /// fills the screen), and the pressed pointer, above the user's hand, reaches the top edge long
+    /// before the hand does: windows were thrown across the screen. The window cannot go above the
+    /// menu bar anyway; edges shared with another display stay open, to cross over.
+    private static func clearOfEdges(_ point: CGPoint, from previous: CGPoint) -> CGPoint {
+        var p = keptOnScreen(point, from: previous)
+        var display: CGDirectDisplayID = 0, count: UInt32 = 0
+        guard CGGetDisplaysWithPoint(p, 1, &display, &count) == .success, count > 0 else { return p }
+        let bounds = CGDisplayBounds(display), margin: CGFloat = 8
+        let screen = NSScreen.screens.first { ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == display }
+        let menuBar = screen.map { $0.frame.maxY - $0.visibleFrame.maxY } ?? 0
+        func open(_ x: CGFloat, _ y: CGFloat) -> Bool {
+            var other: CGDirectDisplayID = 0, n: UInt32 = 0
+            return CGGetDisplaysWithPoint(CGPoint(x: x, y: y), 1, &other, &n) == .success && n > 0
+        }
+        if p.x < bounds.minX + margin, !open(bounds.minX - 1, p.y) { p.x = bounds.minX + margin }
+        if p.x > bounds.maxX - 1 - margin, !open(bounds.maxX, p.y) { p.x = bounds.maxX - 1 - margin }
+        if p.y < bounds.minY + menuBar + margin, !open(p.x, bounds.minY - 1) { p.y = bounds.minY + menuBar + margin }
+        if p.y > bounds.maxY - 1 - margin, !open(p.x, bounds.maxY) { p.y = bounds.maxY - 1 - margin }
+        return p
     }
 
     /// `point`, kept on the displays the way the system keeps the pointer there: a move that would
@@ -686,7 +711,7 @@ extension MouseTracker {
             return false
         }
         let flags = CGEventSource.flagsState(.hidSystemState)
-        postSyntheticMouse(.leftMouseUp, at: drag.titleBarPoint, flags: flags)
+        postSyntheticMouse(.leftMouseUp, at: drag.pressed, flags: flags)
         // The pointer goes back as a move in the same event stream, so the WindowServer ends the
         // drag before it sees the move and the window stays put. Not `CGWarpMouseCursorPosition`:
         // a warp freezes the hardware pointer for about 250 ms, felt as the mouse not answering
