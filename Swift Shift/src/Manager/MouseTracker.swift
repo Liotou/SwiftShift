@@ -522,14 +522,12 @@ private struct TitleBarDrag {
     let startFrame: CGRect?
     var moves = 0
     var followConfirmed = false
-    /// Added to the pressed pointer when the drag started late and the window trails the hand.
-    var correction = CGPoint.zero
     /// The first drag after the press, and when it came: the follow check measures from there.
     var firstDrag: (location: CGPoint, time: TimeInterval)?
 
     /// Where the pressed pointer is on the title bar: it travels with the user's.
     var titleBarPoint: CGPoint {
-        CGPoint(x: grabPoint.x + pointer.x - heldPoint.x + correction.x, y: grabPoint.y + pointer.y - heldPoint.y + correction.y)
+        CGPoint(x: grabPoint.x + pointer.x - heldPoint.x, y: grabPoint.y + pointer.y - heldPoint.y)
     }
 }
 
@@ -689,15 +687,6 @@ extension MouseTracker {
         if let frame = WindowManager.windowServerFrame(of: number),
            abs(frame.minX - start.minX) + abs(frame.minY - start.minY) > 2 {
             titleBarDrag?.followConfirmed = true
-            // An app that starts the drag itself (Safari, Mail, Notes) may start it late, anchored
-            // where the pointer had got to by then: the window would trail the hand by that much for
-            // the rest of the drag. The pressed pointer is moved on by it, and the window catches up.
-            let lag = CGPoint(x: (drag.pointer.x - drag.heldPoint.x) - (frame.minX - start.minX),
-                              y: (drag.pointer.y - drag.heldPoint.y) - (frame.minY - start.minY))
-            if abs(lag.x) > 24 || abs(lag.y) > 24 {
-                titleBarDrag?.correction = lag
-                TrackpadDebugLog.write("titlebar: drag started late, catching up \(lag)")
-            }
             return
         }
         TrackpadDebugLog.write("titlebar: window did not follow, falling back to AX moves")
