@@ -238,13 +238,21 @@ class WindowManager {
     /// the window's own background, an empty stretch of toolbar, or as a last resort the title text,
     /// all belonging to this very window (another window, or Stage Manager's backdrop, may be in
     /// front of it). A tab, a button, a field or a title bar drawn by web content is never pressed.
-    static func titleBarGrabPoint(of window: AXUIElement) -> CGPoint? {
+    /// Tried first right above `nearX`, where the user's hand is: the pressed pointer then shares the
+    /// hand's x, so macOS crosses displays, tiles at the side edges and feeds Stage Manager's strip
+    /// when the hand gets there, not when a pointer the user cannot see does.
+    static func titleBarGrabPoint(of window: AXUIElement, nearX: CGFloat? = nil) -> CGPoint? {
         guard let frame = getFrame(window: window), frame.width > 120, frame.height > 40 else { return nil }
         let system = AXUIElementCreateSystemWide()
-        let fractions: [CGFloat] = [0.75, 0.25, 0.85, 0.15, 0.62, 0.38]
+        var xs: [CGFloat] = []
+        if let nearX {
+            let x = min(max(nearX, frame.minX + 20), frame.maxX - 20)
+            xs = [0, -30, 30, -70, 70, -130, 130].map { x + $0 }.filter { $0 > frame.minX + 10 && $0 < frame.maxX - 10 }
+        }
+        xs += [0.75, 0.25, 0.85, 0.15, 0.62, 0.38].map { frame.minX + frame.width * $0 }
         var titlePoint: CGPoint?
-        for fraction in fractions {
-            let point = CGPoint(x: (frame.minX + frame.width * fraction).rounded(), y: frame.minY + 6)
+        for x in xs {
+            let point = CGPoint(x: x.rounded(), y: frame.minY + 6)
             var element: AXUIElement?
             guard AXUIElementCopyElementAtPosition(system, Float(point.x), Float(point.y), &element) == .success,
                   let element else { continue }

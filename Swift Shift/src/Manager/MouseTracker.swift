@@ -552,8 +552,8 @@ extension MouseTracker {
     fileprivate func armTitleBarDrag() -> Bool {
         guard PreferencesManager.loadBool(for: .nativeDrag, defaultValue: true),
               let window = trackedWindow,
-              let grab = WindowManager.titleBarGrabPoint(of: window),
-              let held = CGEvent(source: nil)?.location else { return false }
+              let held = CGEvent(source: nil)?.location,
+              let grab = WindowManager.titleBarGrabPoint(of: window, nearX: held.x) else { return false }
         let server = WindowManager.windowServerWindow(matching: window)
         titleBarDrag = TitleBarDrag(grabPoint: grab, heldPoint: held, pointer: held, pressed: grab, windowNumber: server?.number, startFrame: server?.frame)
         CGEventSupervisor.shared.subscribe(as: Self.titleBarDragSubscriber,
