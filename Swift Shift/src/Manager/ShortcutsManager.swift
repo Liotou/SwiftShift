@@ -1142,9 +1142,15 @@ final class WindowSnapActionRunner {
   private let animationDuration: TimeInterval = 0.18
   private var animator: WindowFrameAnimator?
 
-  func perform(_ action: WindowSnapAction) {
+  /// With `exitsFullScreen`, a window in full screen leaves it instead: neither action applies to
+  /// it (it has no minimize button, and it already fills its own Space).
+  func perform(_ action: WindowSnapAction, exitsFullScreen: Bool = false) {
     guard let window = targetWindow() else {
       NSSound.beep()
+      return
+    }
+    if exitsFullScreen, WindowManager.isFullScreen(window: window) {
+      WindowManager.setFullScreen(window: window, false)
       return
     }
 
@@ -1499,7 +1505,8 @@ final class DoubleTapActionManager {
       tapStates[config.type] = nil
       guard (now - secondPress) <= maxTapDuration, NSEvent.pressedMouseButtons == 0 else { return }
       if let firstLocation = state.firstPressLocation, distance(firstLocation, NSEvent.mouseLocation) > maxPointerDrift { return }
-      fire(config.action)
+      // The Move key's double-tap also takes a window out of full screen.
+      fire(config.action, exitsFullScreen: config.type == .move)
     } else if let firstPress = state.firstPressAt, state.firstReleaseAt == nil {
       if (now - firstPress) <= maxTapDuration {
         state.firstReleaseAt = now
@@ -1516,9 +1523,9 @@ final class DoubleTapActionManager {
     hypot(a.x - b.x, a.y - b.y)
   }
 
-  private func fire(_ action: WindowSnapAction) {
+  private func fire(_ action: WindowSnapAction, exitsFullScreen: Bool) {
     DispatchQueue.main.async {
-      WindowSnapActionRunner.shared.perform(action)
+      WindowSnapActionRunner.shared.perform(action, exitsFullScreen: exitsFullScreen)
     }
   }
 }

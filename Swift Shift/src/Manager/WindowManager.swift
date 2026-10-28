@@ -152,6 +152,19 @@ class WindowManager {
         AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, (minimized ? kCFBooleanTrue : kCFBooleanFalse))
     }
 
+    /// Whether the window is in macOS full screen, in a Space of its own.
+    static func isFullScreen(window: AXUIElement) -> Bool {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(window, "AXFullScreen" as CFString, &value) == .success,
+              let value, CFGetTypeID(value) == CFBooleanGetTypeID() else { return false }
+        return CFBooleanGetValue((value as! CFBoolean))
+    }
+
+    @discardableResult
+    static func setFullScreen(window: AXUIElement, _ fullScreen: Bool) -> AXError {
+        AXUIElementSetAttributeValue(window, "AXFullScreen" as CFString, (fullScreen ? kCFBooleanTrue : kCFBooleanFalse))
+    }
+
     /// Whether the AX reference still points at a live, responsive window.
     /// Bounds the messaging timeout so a hung (not terminated) owning app can't
     /// stall this for the full multi-second AX default — callers may probe
