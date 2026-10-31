@@ -522,6 +522,8 @@ private struct TitleBarDrag {
     let startFrame: CGRect?
     var moves = 0
     var followConfirmed = false
+    /// Set once the drag is being handed over to AX moves: nothing more is posted.
+    var handingOver = false
     /// The first drag after the press, and when it came: the follow check measures from there.
     var firstDrag: (location: CGPoint, time: TimeInterval)?
 
@@ -552,11 +554,18 @@ extension MouseTracker {
     fileprivate func armTitleBarDrag() -> Bool {
         guard PreferencesManager.loadBool(for: .nativeDrag, defaultValue: true),
               let window = trackedWindow,
-              let held = CGEvent(source: nil)?.location,
-              let grab = WindowManager.titleBarGrabPoint(of: window, nearX: held.x),
-              // Pressed far to the side of the hand, the window would answer to a pointer the user
-              // cannot see (tiling, Stage Manager, display changes): such windows move through AX.
-              abs(grab.x - held.x) <= 140 else { return false }
+              let held = CGEvent(source: nil)?.location else { return false }
+        // Best right above the hand: pressed far to its side, the window answers to a pointer the
+        // user cannot see (tiling, Stage Manager, display changes). Failing that, between the
+        // window's own buttons, the one safe point of apps whose title bar is web content.
+        let grab: CGPoint
+        if let near = WindowManager.titleBarGrabPoint(of: window, nearX: held.x), abs(near.x - held.x) <= 140 {
+            grab = near
+        } else if let gap = WindowManager.trafficLightGrabPoint(of: window) {
+            grab = gap
+        } else {
+            return false
+        }
         let server = WindowManager.windowServerWindow(matching: window)
         titleBarDrag = TitleBarDrag(grabPoint: grab, heldPoint: held, pointer: held, pressed: grab, windowNumber: server?.number, startFrame: server?.frame)
         CGEventSupervisor.shared.subscribe(as: Self.titleBarDragSubscriber,
@@ -578,6 +587,7 @@ extension MouseTracker {
         guard event.type == .mouseMoved, var drag = titleBarDrag else { return }
         let location = event.location, heldModifiers = event.flags
         event.cancel()
+        guard !drag.handingOver else { return }
         if !drag.isPressed {
             drag.isPressed = true
             drag.heldPoint = location
@@ -605,6 +615,14 @@ extension MouseTracker {
         drag.pointer = Self.keptOnScreen(CGPoint(x: drag.pointer.x + delta.x, y: drag.pointer.y + delta.y))
         drag.pressed = Self.clearOfEdges(drag.titleBarPoint)
         titleBarDrag = drag
+        // Held far to the side of the hand (between the window's buttons, say), the pressed pointer
+        // can reach a display's outer edge while the hand still has room: the window would stop
+        // there. AX moves take over, which carry it past the edge; no display lies beyond, so there
+        // is no display change, the one thing native dragging is for.
+        if abs(drag.pressed.x - drag.titleBarPoint.x) > 24 {
+            fallBackToAXMoves("pressed pointer held at a display edge")
+            return
+        }
         postSyntheticMouse(.leftMouseDragged, at: drag.pressed, flags: heldModifiers)
         cursorStandIn.show(cursor(for: .move), atQuartz: drag.pointer)
         checkTheWindowFollows(pointer: drag.pointer)
@@ -691,17 +709,25 @@ extension MouseTracker {
             titleBarDrag?.followConfirmed = true
             return
         }
-        TrackpadDebugLog.write("titlebar: window did not follow, falling back to AX moves")
+        fallBackToAXMoves("window did not follow")
+    }
+
+    /// Releases the title bar and carries on the move through AX writes.
+    private func fallBackToAXMoves(_ reason: String) {
+        guard titleBarDrag?.handingOver == false else { return }
+        titleBarDrag?.handingOver = true
+        let number = titleBarDrag?.windowNumber
+        TrackpadDebugLog.write("titlebar: \(reason), falling back to AX moves")
         // Out of the event tap callback first: cancelling the subscription rebuilds the tap.
         DispatchQueue.main.async { [weak self] in
             guard let self, self.titleBarDrag != nil, self.isTracking else { return }
             _ = self.endTitleBarDrag { [weak self] in
                 // Baselined once the pointer is back under the user's hand, or its move back would
-                // shift the window.
+                // shift the window. The WindowServer's frame, not AX's, which lags a native drag.
                 guard let self, self.isTracking, self.currentAction == .move, let window = self.trackedWindow else { return }
                 self.mouseLocationCoordinateSpace = .appKit
                 self.initialMouseLocation = NSEvent.mouseLocation
-                self.initialWindowLocation = WindowManager.getPosition(window: window)
+                self.initialWindowLocation = number.flatMap { WindowManager.windowServerFrame(of: $0)?.origin } ?? WindowManager.getPosition(window: window)
                 AXWindowWriter.shared.reset(origin: self.initialWindowLocation, size: self.windowSize)
                 self.registerMouseEventMonitor(button: .none)
                 self.applyCursor()

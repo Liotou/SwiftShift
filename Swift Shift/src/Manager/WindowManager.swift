@@ -279,6 +279,46 @@ class WindowManager {
         return titlePoint
     }
 
+    /// The gap between the window's own minimize and zoom buttons (or close and minimize). Apps that
+    /// draw their title bar in web content (Electron: Obsidian, Slack, VS Code) show Accessibility
+    /// nothing there but one group the size of the window, so no point of it can be told safe; the
+    /// space between these buttons is the one place every app leaves free and draggable.
+    static func trafficLightGrabPoint(of window: AXUIElement) -> CGPoint? {
+        guard let windowFrame = getFrame(window: window) else { return nil }
+        let buttons = [kAXCloseButtonAttribute, kAXMinimizeButtonAttribute, kAXZoomButtonAttribute].compactMap { attribute -> CGRect? in
+            var value: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(window, attribute as CFString, &value) == .success, let value,
+                  CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+            return elementFrame(value as! AXUIElement)
+        }.sorted { $0.minX < $1.minX }
+        guard buttons.count >= 2 else { return nil }
+        let system = AXUIElementCreateSystemWide()
+        for (left, right) in zip(buttons, buttons.dropFirst()).reversed() where right.minX - left.maxX >= 3 {
+            let point = CGPoint(x: ((left.maxX + right.minX) / 2).rounded(), y: left.midY.rounded())
+            guard point.y - windowFrame.minY < 60 else { continue }
+            var element: AXUIElement?
+            guard AXUIElementCopyElementAtPosition(system, Float(point.x), Float(point.y), &element) == .success,
+                  let element else { continue }
+            // The window itself, or the one group covering all of it: never a control.
+            if CFEqual(element, window) { return point }
+            if let frame = elementFrame(element), frame.insetBy(dx: -2, dy: -2).contains(windowFrame),
+               attributeString(element, kAXRoleAttribute) == kAXGroupRole,
+               let owner = getWindow(from: element), CFEqual(owner, window) { return point }
+        }
+        return nil
+    }
+
+    private static func elementFrame(_ element: AXUIElement) -> CGRect? {
+        var position: CFTypeRef?, size: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &position) == .success,
+              AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &size) == .success,
+              let position, let size else { return nil }
+        var origin = CGPoint.zero, extent = CGSize.zero
+        AXValueGetValue(position as! AXValue, .cgPoint, &origin)
+        AXValueGetValue(size as! AXValue, .cgSize, &extent)
+        return CGRect(origin: origin, size: extent)
+    }
+
     private static func attributeString(_ element: AXUIElement, _ attribute: String) -> String? {
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success else { return nil }
